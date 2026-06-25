@@ -122,13 +122,13 @@ class HomePage extends BasePage {
     // "Add to Cart" button on the first visible product card
     // In Magento 2, the button has class "action tocart"
     this.firstAddToCartButton = page.locator(
-      '.product-item .action.tocart, .product-item button[data-action="add-to-cart"]'
+      '//div[@aria-label="2 / 10"]//button[@title="Add to Cart"]//span[contains(text(),"Add to Cart")]'
     ).first();
 
     // Product title link on the first product card
     // Clicking this goes to the Product Detail Page (PDP)
     this.firstProductTitleLink = page.locator(
-      '.product-item-name a, .product-item-info .product-item-link'
+      '//div[@aria-label="1 / 10"]//a[@class="product-item-link"][normalize-space()="HAL Dove Beauty Cream Bar Admin"]'
     ).first();
 
     // Any Magento message rendered after an action (Add to Cart, etc.)
@@ -137,7 +137,7 @@ class HomePage extends BasePage {
     //   "message-notice"  (item needs options selected first)
     //   "message-error"   (something went wrong)
     // The [data-ui-id^="message-"] selector matches ALL of these types.
-    this.successMessage = page.locator('div[data-ui-id^="message-"]');
+    this.successMessage = page.locator('//div[@data-bind=\'html: $parent.prepareMessageForHtml(message.text)\']');
 
     // Cart item counter badge (the number on the cart icon)
     // e.g. shows "1" after adding one product
