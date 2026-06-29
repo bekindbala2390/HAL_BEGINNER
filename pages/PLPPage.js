@@ -148,6 +148,9 @@ class PLPPage extends BasePage {
     // Each group holds multiple .swatch-option buttons
     this.pdpSwatchGroups = page.locator('.swatch-opt .swatch-attribute');
 
+    // Quantity input on the PDP (standard Magento id="qty")
+    this.pdpQtyInput = page.locator('input#qty');
+
     // --------------------------------------------------------
     // NAV LINK LOCATOR (for navigateFromHome())
     // ------------------------------------------
@@ -562,6 +565,31 @@ class PLPPage extends BasePage {
   }
 
   // ----------------------------------------------------------
+  // getMOQFromPDP()
+  // ----------------
+  // Reads the Minimum Order Quantity from the PDP.
+  //
+  // The HAL UAE site shows an MOQ badge like: "MOQ (5 Unit)"
+  // This method finds that text, extracts the number, and returns it.
+  //
+  // Returns 1 if no MOQ label is found (no minimum enforced).
+  // ----------------------------------------------------------
+  async getMOQFromPDP() {
+    // Match text like "MOQ (5 Unit)" or "MOQ (10 Unit)" anywhere on the PDP
+    const moqEl = this.page.getByText(/MOQ \(\d+ Unit/i).first();
+    try {
+      await moqEl.waitFor({ state: 'visible', timeout: 5000 });
+      const text = await moqEl.textContent();
+      // Pull the first number out of the text, e.g. "MOQ (5 Unit)" → 5
+      const match = text.match(/\d+/);
+      return match ? parseInt(match[0], 10) : 1;
+    } catch {
+      // No MOQ label found on this PDP — default to qty 1
+      return 1;
+    }
+  }
+
+  // ----------------------------------------------------------
   // addToCartFromPDP()
   // -------------------
   // Adds the currently open PDP product to the cart.
@@ -569,9 +597,13 @@ class PLPPage extends BasePage {
   // Steps:
   //   1. Wait for Knockout page scripts to finish loading
   //   2. Auto-select any required swatch options (configurable product)
-  //   3. Click the main "Add to Cart" button on the PDP
+  //   3. Read the MOQ badge — e.g. "MOQ (5 Unit)" → moq = 5
+  //   4. Set the qty input to the MOQ value so the minimum is met
+  //   5. Click the main "Add to Cart" button
   //
-  // Returns true if the success toast appeared, false otherwise.
+  // Returns { success: boolean, qty: number }
+  //   success → true if the green toast appeared
+  //   qty     → the quantity that was entered (equals the MOQ, or 1)
   // ----------------------------------------------------------
   async addToCartFromPDP() {
     // Knockout's cart binding requires the full 'load' event
@@ -580,14 +612,32 @@ class PLPPage extends BasePage {
     // Auto-select swatch options if this is a configurable product
     await this._selectFirstSwatchOptionsOnPDP();
 
+    // Read the MOQ from the PDP badge (returns 1 if none found)
+    const moq = await this.getMOQFromPDP();
+    console.log('MOQ detected on PDP:', moq);
+
+    // If MOQ > 1, update the qty input so the minimum order is satisfied
+    if (moq > 1) {
+      try {
+        await this.pdpQtyInput.waitFor({ state: 'visible', timeout: 5000 });
+        // Clear the field first, then type the MOQ value
+        await this.pdpQtyInput.fill(String(moq));
+        console.log('Qty input set to MOQ:', moq);
+      } catch {
+        // Qty input not found — proceed with whatever default is set
+        console.log('Qty input not found, proceeding without changing qty');
+      }
+    }
+
     // Wait for the Add to Cart button to be visible and clickable
     await this.pdpAddToCartButton.waitFor({ state: 'visible' });
 
     // Click the main PDP "Add to Cart" button
     await this.pdpAddToCartButton.click();
 
-    // Return whether the success toast appeared
-    return await this.isSuccessMessageVisible();
+    // Return both the success flag and the qty that was entered
+    const success = await this.isSuccessMessageVisible();
+    return { success, qty: moq };
   }
 
   // ----------------------------------------------------------

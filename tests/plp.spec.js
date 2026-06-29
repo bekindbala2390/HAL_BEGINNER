@@ -433,9 +433,10 @@ test.describe('PLP — All Products Page End-to-End Suite', () => {
     } else {
       // Configurable product: complete the add-to-cart on the PDP
       console.log('Configurable product — completing add-to-cart on PDP');
-      const pdpAdded = await plp.addToCartFromPDP();
-      if (pdpAdded) {
-        cartCount += 1;
+      const pdpResult = await plp.addToCartFromPDP();
+      if (pdpResult.success) {
+        // Add the MOQ qty (e.g. 5 if MOQ badge said "MOQ (5 Unit)")
+        cartCount += pdpResult.qty;
       }
 
       // Return to the PLP so test 8 starts in the right place
@@ -515,9 +516,10 @@ test.describe('PLP — All Products Page End-to-End Suite', () => {
     } else {
       // Configurable product — complete on PDP then return
       console.log('Configurable product — completing add-to-cart on PDP (test 8)');
-      const pdpAdded = await plp.addToCartFromPDP();
-      if (pdpAdded) {
-        cartCount += 1;
+      const pdpResult = await plp.addToCartFromPDP();
+      if (pdpResult.success) {
+        // Add the MOQ qty (e.g. 5 if MOQ badge said "MOQ (5 Unit)")
+        cartCount += pdpResult.qty;
       }
       await plp.goto();
     }
@@ -576,19 +578,21 @@ test.describe('PLP — All Products Page End-to-End Suite', () => {
     expect(pdpTitle.toLowerCase()).toContain(shortName);
 
     // ASSERTION 3: Add to cart from PDP
-    // addToCartFromPDP() auto-selects swatch options (if configurable),
-    // clicks the Add to Cart button, and returns true if the toast appeared.
-    const addedSuccessfully = await plp.addToCartFromPDP();
-    console.log('PDP add-to-cart success toast:', addedSuccessfully);
+    // addToCartFromPDP() reads the MOQ badge (e.g. "MOQ (5 Unit)"),
+    // sets the qty input to that number, clicks Add to Cart, and
+    // returns { success, qty } where qty is the MOQ that was entered.
+    const addResult = await plp.addToCartFromPDP();
+    console.log('PDP add-to-cart success toast:', addResult.success);
+    console.log('Qty added (MOQ):', addResult.qty);
 
     // Read the FINAL cart counter after this add
     const finalCountText = await plp.getCartCounterText();
     const finalCount = parseInt(finalCountText, 10);
     console.log('FINAL cart count after test 9:', finalCount);
 
-    if (addedSuccessfully) {
-      // Toast appeared → product added → counter must be exactly +1
-      expect(finalCount).toBe(countBefore + 1);
+    if (addResult.success) {
+      // Toast appeared → product added → counter must increase by the MOQ qty
+      expect(finalCount).toBe(countBefore + addResult.qty);
     } else {
       // If the product required complex option selection not handled by
       // auto-select, the add may not complete. We still verify the counter
