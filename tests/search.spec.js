@@ -290,6 +290,26 @@ test.describe('Search Functionality - Full Test Suite', () => {
     const currentUrl = page.url();
     console.log('URL after sort change:', currentUrl);
     expect(currentUrl).toContain('name');
+
+    // ----------------------------------------------------------
+    // Verify the products are actually sorted A–Z by product name
+    //
+    // We read the first few visible product names and confirm each
+    // one comes at or before the next one alphabetically.
+    // This proves the sort was applied to the displayed grid, not
+    // just reflected in the URL.
+    // ----------------------------------------------------------
+    const sortedNames = await searchPage.getProductNames(5);
+    console.log('Product names after sort-by-name:', sortedNames);
+
+    // Need at least 2 names for a meaningful order comparison
+    if (sortedNames.length >= 2) {
+      for (let i = 0; i < sortedNames.length - 1; i++) {
+        // Each name must come before (or equal to) the next alphabetically
+        expect(sortedNames[i].toLowerCase() <= sortedNames[i + 1].toLowerCase())
+          .toBe(true);
+      }
+    }
   });
 
 

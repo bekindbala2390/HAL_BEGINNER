@@ -355,27 +355,24 @@ class SearchPage extends BasePage {
     // become active after ALL page scripts have loaded.
     await this.page.waitForLoadState('load');
 
-    // waitForLoadState('load') is NOT enough — Magento also fires
-    // several AJAX section-loads (cart, customer) after DOMLoaded.
-    // The cart icon shows a "Loading..." img until Knockout finishes.
+    // waitForLoadState('load') is not enough — Magento also fires AJAX
+    // "section loads" (cart, customer) AFTER the load event, via RequireJS.
+    // The Add to Cart button's Knockout click-binding is only attached once
+    // those modules finish. Two signals confirm Knockout is fully ready:
     //
-    // We wait for that img to disappear using page.waitForFunction(),
-    // which runs in the BROWSER's JS context. This is more reliable
-    // than a Playwright CSS locator because:
-    //   - The cart link on this custom theme may NOT have class "showcart"
-    //   - CSS [role="banner"] works regardless of the HTML tag name
-    //   - offsetParent === null detects display:none (CSS-hidden) elements
-    // The loading spinner is inside the cart link.
-    // We use waitForFunction() (browser JS context) instead of a CSS
-    // locator because the cart link may not have class "showcart" on this
-    // custom theme, making 'a.showcart img' unreliable.
-    // We also avoid scoping to [role="banner"] because that only matches
-    // EXPLICIT HTML role attributes, not the semantic <header> element
-    // (which has implicit role="banner" in ARIA but no HTML attribute).
-    // Searching the whole document for img[alt="Loading..."] is safe here
-    // because only the Knockout cart section loader uses that exact alt text.
-    // waitForSelector with state:'hidden' handles all cases:
-    // element not in DOM, display:none, visibility:hidden, etc.
+    //   1. The minicart counter element (.counter.qty) is in the DOM —
+    //      Knockout renders this only after the cart section AJAX completes.
+    //
+    //   2. The loading spinner img (alt="Loading...") is hidden —
+    //      it disappears when the AJAX section load finishes.
+    //
+    // Waiting for BOTH guarantees the product-form click-handlers are live.
+    // .catch(() => {}) makes each wait non-fatal (handles timeout silently).
+    await this.page.waitForSelector('.minicart-wrapper .counter.qty', {
+      state: 'attached',
+      timeout: 15000,
+    }).catch(() => {});
+
     await this.page.waitForSelector('img[alt="Loading..."]', {
       state: 'hidden',
       timeout: 15000,
@@ -583,6 +580,26 @@ class SearchPage extends BasePage {
 
     // Return the name for comparison in the test
     return productName;
+  }
+
+  // ----------------------------------------------------------
+  // getProductNames(limit)
+  // -----------------------
+  // Returns an array of product name strings (up to `limit` items)
+  // visible on the current search results page.
+  //
+  // Used after applying a sort to verify the products are in the
+  // expected order (e.g. alphabetical after sort-by-name).
+  // ----------------------------------------------------------
+  async getProductNames(limit = 5) {
+    const count = await this.productNameLinks.count();
+    const total = Math.min(count, limit);
+    const names = [];
+    for (let i = 0; i < total; i++) {
+      const name = await this.productNameLinks.nth(i).textContent();
+      names.push(name.trim());
+    }
+    return names;
   }
 
   // ----------------------------------------------------------
