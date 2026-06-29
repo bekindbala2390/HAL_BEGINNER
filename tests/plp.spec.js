@@ -17,11 +17,12 @@
 //   Test 7 — Add first product in row 2 to cart; check counter
 //   Test 8 — Go to page 2; add 3rd product; check counter increments
 //   Test 9 — Open 2nd product PDP; add to cart; verify final count
+//   Test 10 — Apply price filter; verify products match the price range
 //
 // BROWSER SESSION STRATEGY:
 //   One browser tab is opened in beforeAll and closed in afterAll.
-//   All 9 tests share the same browser session (same cart, cookies).
-//   Tests 1–6 call plp.goto() at the start to reset to a known state.
+//   All 10 tests share the same browser session (same cart, cookies).
+//   Tests 1–6 and 10 call plp.goto() at the start to reset to a known state.
 //   Tests 7–9 share a running `cartCount` to track cumulative adds.
 //
 // GRID COLUMN ASSUMPTION:
@@ -602,6 +603,85 @@ test.describe('PLP — All Products Page End-to-End Suite', () => {
 
     console.log(`\n=== PLP TEST SUITE COMPLETE ===`);
     console.log(`Final cart item count: ${finalCount}`);
+  });
+
+
+  // ============================================================
+  // TEST 10 — Apply price filter and verify products match the range
+  //
+  // We navigate back to the clean PLP, find the "Price" filter
+  // in the left sidebar, click the first available price range,
+  // and then assert:
+  //   1. The URL updated with a price parameter (filter was applied)
+  //   2. At least one product is still visible (range returned results)
+  //   3. Every displayed product price falls within the selected range
+  // ============================================================
+  test('should apply price filter and verify products match the price range', async () => {
+
+    // Start on a clean, unfiltered page 1
+    await plp.goto();
+
+    // Record the URL and product count BEFORE applying the price filter
+    const urlBeforeFilter = page.url();
+    const countBeforeFilter = await plp.getProductCount();
+    console.log('Products before price filter:', countBeforeFilter);
+
+    // Click the first price range in the sidebar Price filter.
+    // Returns the range text (e.g. "AED 50.00 - AED 199.99") or null
+    // if no price filter section exists on this PLP.
+    const rangeText = await plp.applyPriceFilter();
+
+    if (!rangeText) {
+      // Price filter is not available on this PLP — exit gracefully
+      console.log('Price filter not available — skipping test 10.');
+      return;
+    }
+
+    console.log('Price range applied:', rangeText);
+
+    // ASSERTION 1: URL must have changed (Magento appends price=<min>-<max>)
+    const urlAfterFilter = page.url();
+    console.log('URL before price filter:', urlBeforeFilter);
+    console.log('URL after price filter: ', urlAfterFilter);
+    expect(urlAfterFilter).not.toEqual(urlBeforeFilter);
+
+    // ASSERTION 2: At least one product must be visible after filtering
+    const countAfterFilter = await plp.getProductCount();
+    console.log('Products after price filter:', countAfterFilter);
+    expect(countAfterFilter).toBeGreaterThan(0);
+
+    // ASSERTION 3: Verify each displayed product price is within the range
+    //
+    // Parse min and max numbers from the range text.
+    // The text may look like "AED 50.00 - AED 199.99" or "50 - 200".
+    // The regex matches digit sequences (with optional commas and decimals).
+    const numbers = rangeText.match(/[\d,]+(?:\.\d+)?/g);
+
+    if (numbers && numbers.length >= 2) {
+      // Remove commas (e.g. "1,234" → "1234") then parse to float
+      const minPrice = parseFloat(numbers[0].replace(/,/g, ''));
+      const maxPrice = parseFloat(numbers[numbers.length - 1].replace(/,/g, ''));
+      console.log(`Parsed price range: ${minPrice} – ${maxPrice}`);
+
+      // Collect one numeric price per product card on the filtered page
+      const productPrices = await plp.getProductPriceValues();
+      console.log('Displayed product prices:', productPrices);
+
+      if (productPrices.length > 0) {
+        // Every product price must sit within [minPrice, maxPrice]
+        for (const price of productPrices) {
+          console.log(`Verifying price ${price} is in range [${minPrice}, ${maxPrice}]`);
+          expect(price).toBeGreaterThanOrEqual(minPrice);
+          expect(price).toBeLessThanOrEqual(maxPrice);
+        }
+      } else {
+        // Prices could not be read from the cards (e.g. hidden by theme)
+        console.log('Could not read product prices — skipping price range assertion.');
+      }
+    } else {
+      // Range text format was not parseable — skip the price assertion
+      console.log(`Could not parse price range from "${rangeText}" — skipping comparison.`);
+    }
   });
 
 });

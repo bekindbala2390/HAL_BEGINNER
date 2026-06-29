@@ -160,6 +160,28 @@ class PLPPage extends BasePage {
     this.allProductsNavLink = page.locator(
       '.nav-sections a[href*="all-products"], nav a[href*="all-products"]'
     ).first();
+
+    // --------------------------------------------------------
+    // PRICE FILTER LOCATORS
+    // ----------------------
+    // The "Price" section in the left sidebar Layered Navigation.
+    // Clicking a price range narrows the grid to products within
+    // that band and appends a price=<min>-<max> query param to the URL.
+    // --------------------------------------------------------
+
+    // The entire Price filter block (contains title + range option links)
+    this.priceFilterSection = page.locator('.filter-options-item').filter({
+      has: page.locator('.filter-options-title', { hasText: /price/i }),
+    });
+
+    // The expand/collapse title row of the Price filter block
+    this.priceFilterTitle = this.priceFilterSection.locator('.filter-options-title');
+
+    // Each <li> row in the price filter — works for both link-style and radio-style themes
+    this.priceFilterItems = this.priceFilterSection.locator('.filter-options-content li');
+
+    // The content container — visible when the panel is expanded
+    this.priceFilterContent = this.priceFilterSection.locator('.filter-options-content');
   }
 
 
@@ -649,6 +671,110 @@ class PLPPage extends BasePage {
   async getPDPProductTitle() {
     await this.pdpProductTitle.first().waitFor({ state: 'visible' });
     return (await this.pdpProductTitle.first().textContent()).trim();
+  }
+
+  // ----------------------------------------------------------
+  // applyPriceFilter()
+  // -------------------
+  // Clicks the first available price range in the sidebar
+  // Price filter section (Layered Navigation).
+  //
+  // Steps:
+  //   1. Check the Price filter section exists on this page
+  //   2. Expand the panel if it is currently collapsed
+  //   3. Click the first price range link (e.g. "AED 50 - AED 199")
+  //   4. Wait for the product grid to reload with filtered results
+  //
+  // Returns the range link text (e.g. "AED 50.00 - AED 199.99")
+  // so the caller can parse the min/max for price assertions.
+  // Returns null if no price filter section is found on the page.
+  // ----------------------------------------------------------
+  async applyPriceFilter() {
+    // Check whether a Price filter section exists in the sidebar
+    const sectionCount = await this.priceFilterSection.count();
+    if (sectionCount === 0) {
+      console.log('Price filter section not found in sidebar');
+      return null;
+    }
+
+    // Check whether the content panel is already expanded (visible)
+    let contentVisible = false;
+    try {
+      await this.priceFilterContent.waitFor({ state: 'visible', timeout: 5000 });
+      contentVisible = true;
+    } catch {
+      contentVisible = false;
+    }
+
+    if (!contentVisible) {
+      // Panel is collapsed — click the title row to expand it
+      await this.priceFilterTitle.waitFor({ state: 'visible', timeout: 10000 });
+      await this.priceFilterTitle.click();
+      // Wait for the content area to become visible
+      await this.priceFilterContent.waitFor({ state: 'visible' });
+    }
+
+    // Wait for the first price range row to be visible
+    const firstItem = this.priceFilterItems.first();
+    await firstItem.waitFor({ state: 'visible' });
+
+    // Read the range text from the row (e.g. "AED 0.00 - AED 999.99")
+    const rangeText = (await firstItem.textContent()).trim();
+
+    // This theme uses radio buttons — click it to apply the price filter
+    const radio = firstItem.locator('input[type="radio"]');
+    const radioCount = await radio.count();
+    if (radioCount > 0) {
+      await radio.click();
+    } else {
+      // Fallback: theme may use an <a> link instead — click the row directly
+      await firstItem.locator('a').first().click();
+    }
+
+    // Wait for the filtered product grid to fully reload
+    await this.waitForPageLoad();
+
+    return rangeText;
+  }
+
+  // ----------------------------------------------------------
+  // getProductPriceValues()
+  // ------------------------
+  // Returns an array of numeric price values — one per product
+  // card on the current PLP page.
+  //
+  // Reads the FIRST .price element inside each .product-item so
+  // that configurable products (which show "from AED X") return
+  // only the lowest/starting price, not a duplicate.
+  //
+  // Handles common Magento price formats:
+  //   "AED 1,234.56"  → 1234.56
+  //   "AED1,234"      → 1234
+  //   "$99.99"        → 99.99
+  //
+  // Returns an empty array if no price elements can be read.
+  // ----------------------------------------------------------
+  async getProductPriceValues() {
+    const count = await this.productItems.count();
+    const prices = [];
+
+    for (let i = 0; i < count; i++) {
+      // Read only the FIRST .price inside each product card
+      const priceEl = this.productItems.nth(i).locator('.price').first();
+      try {
+        const text = await priceEl.textContent({ timeout: 3000 });
+        // Strip everything except digits and dots, then parse
+        const numericStr = text.replace(/[^0-9.]/g, '');
+        const value = parseFloat(numericStr);
+        if (!isNaN(value)) {
+          prices.push(value);
+        }
+      } catch {
+        // No .price element found in this card — skip it
+      }
+    }
+
+    return prices;
   }
 
 }
