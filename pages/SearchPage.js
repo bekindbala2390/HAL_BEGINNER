@@ -374,11 +374,12 @@ class SearchPage extends BasePage {
     // (which has implicit role="banner" in ARIA but no HTML attribute).
     // Searching the whole document for img[alt="Loading..."] is safe here
     // because only the Knockout cart section loader uses that exact alt text.
-    await this.page.waitForFunction(() => {
-      const img = document.querySelector('img[alt="Loading..."]');
-      if (!img) return true;
-      return window.getComputedStyle(img).display === 'none';
-    }, { timeout: 60000 }).catch(() => {});
+    // waitForSelector with state:'hidden' handles all cases:
+    // element not in DOM, display:none, visibility:hidden, etc.
+    await this.page.waitForSelector('img[alt="Loading..."]', {
+      state: 'hidden',
+      timeout: 15000,
+    }).catch(() => {});
 
     // Prefer simple products — products labelled "Variants Available"
     // open a configure popup instead of showing a success toast, which
