@@ -246,6 +246,51 @@ class PDPPage extends BasePage {
     this.cartCounter = page.locator(
       '.counter.qty .counter-number, .minicart-wrapper .counter-number'
     );
+
+    // ============================================================
+    // SECTION 11: WISHLIST AND COMPARE LOCATORS
+    // (Only available for logged-in users)
+    // ============================================================
+    //
+    // Magento 2 renders these two action links inside .product-addto-links
+    // on every PDP.  For guest users, clicking either link redirects to
+    // the login page.  For logged-in users they work immediately.
+    //
+    // Structure in the DOM:
+    //   .product-addto-links
+    //   ├── <a class="action towishlist">Add to Wish List</a>
+    //   └── <a class="action tocompare">Add to Compare</a>
+
+    // "Add to Wish List" link.
+    // Clicking POSTs to the wishlist endpoint and then REDIRECTS
+    // the browser to the customer's wishlist page (/wishlist/index/index/).
+    this.wishlistButton = page.locator(
+      'a.action.towishlist, ' +
+      '[data-action="add-to-wishlist"], ' +
+      '.product-addto-links a[href*="wishlist"]'
+    ).first();
+
+    // "Add to Compare" link.
+    // Clicking sends an AJAX request; the browser STAYS on the PDP
+    // and a green success toast appears at the top of the page.
+    this.compareButton = page.locator(
+      'a.action.tocompare, ' +
+      '[data-action="add-to-compare"], ' +
+      '.product-addto-links a[href*="compare"]'
+    ).first();
+
+    // Green success flash message shown after adding to compare.
+    // Reuses the same .message-success selector as the add-to-cart toast.
+    this.compareSuccessMessage = page.locator('.message-success, .message.success');
+
+    // "Compare Products" button link that appears in the compare sidebar block
+    // after at least one product has been added to the compare list.
+    // Clicking it navigates to /catalog/product_compare/index/.
+    this.compareProductsLink = page.locator(
+      '.block.block-compare .action.compare, ' +
+      'a.action.compare[href*="compare"], ' +
+      'a[href*="catalog/product_compare/index"]'
+    ).first();
   }
 
 
@@ -1046,6 +1091,157 @@ class PDPPage extends BasePage {
       // Badge is hidden — cart is empty
       return '0';
     }
+  }
+
+  // ============================================================
+  // 11. WISHLIST AND COMPARE METHODS (logged-in users only)
+  // ============================================================
+
+  // ----------------------------------------------------------
+  // clickAddToWishlist()
+  // ---------------------
+  // Clicks the "Add to Wish List" link on the PDP.
+  //
+  // WHAT HAPPENS NEXT (Magento 2 standard behaviour):
+  //   Magento POSTs to /wishlist/index/add/ and then REDIRECTS
+  //   the browser to the customer's wishlist page.
+  //   Call isOnWishlistPage() after this to confirm the redirect.
+  //
+  // NOTE: For configurable products, select all swatch options
+  //       BEFORE calling this so the variant is saved to the wishlist.
+  // ----------------------------------------------------------
+  async clickAddToWishlist() {
+    // Wait for the full page load (Magento attaches wishlist listener after 'load')
+    await this.page.waitForLoadState('load');
+
+    // Wait for the wishlist link to be visible
+    await this.wishlistButton.waitFor({ state: 'visible', timeout: 10000 });
+
+    console.log('PDPPage.clickAddToWishlist — clicking wishlist link');
+    await this.wishlistButton.click();
+
+    // Wait for Magento to process the request and start the redirect
+    await this.page.waitForLoadState('domcontentloaded');
+  }
+
+  // ----------------------------------------------------------
+  // isOnWishlistPage()
+  // -------------------
+  // Returns true if the browser has been redirected to the
+  // customer's wishlist page after clicking "Add to Wish List".
+  //
+  // Magento 2 wishlist URL pattern: /wishlist/index/index/
+  // ----------------------------------------------------------
+  async isOnWishlistPage() {
+    const url = this.page.url();
+    const result = url.includes('wishlist');
+    console.log('PDPPage.isOnWishlistPage — URL:', url, '→', result);
+    return result;
+  }
+
+  // ----------------------------------------------------------
+  // getWishlistSuccessMessage()
+  // ----------------------------
+  // Reads the success flash message text shown on the wishlist page
+  // after a product has been added.
+  //
+  // Typical Magento 2 message:
+  //   "[Product Name] has been added to your Wish List. Click here to continue shopping."
+  //
+  // Returns the message string, or '' if no message is found.
+  // ----------------------------------------------------------
+  async getWishlistSuccessMessage() {
+    try {
+      const msgEl = this.page.locator('.message-success, .message.success').first();
+      await msgEl.waitFor({ state: 'visible', timeout: 10000 });
+      const text = (await msgEl.textContent()).trim();
+      console.log('PDPPage.getWishlistSuccessMessage —', text);
+      return text;
+    } catch {
+      return '';
+    }
+  }
+
+  // ----------------------------------------------------------
+  // clickAddToCompare()
+  // --------------------
+  // Clicks the "Add to Compare" link on the PDP.
+  //
+  // WHAT HAPPENS NEXT (Magento 2 standard behaviour):
+  //   Unlike wishlist, compare uses AJAX — the browser STAYS on
+  //   the PDP and a green success toast appears at the top.
+  //   Call isCompareSuccessVisible() after this to confirm the toast.
+  //
+  // NOTE: For configurable products, select swatch options first
+  //       so the variant is added to the compare list.
+  // ----------------------------------------------------------
+  async clickAddToCompare() {
+    // Wait for the page to fully load before interacting
+    await this.page.waitForLoadState('load');
+
+    // Wait for the compare link to be visible
+    await this.compareButton.waitFor({ state: 'visible', timeout: 10000 });
+
+    console.log('PDPPage.clickAddToCompare — clicking compare link');
+    await this.compareButton.click();
+
+    // Give the AJAX call time to complete and the toast to render
+    await this.page.waitForTimeout(2000);
+  }
+
+  // ----------------------------------------------------------
+  // isCompareSuccessVisible()
+  // --------------------------
+  // Returns true if the green success toast appeared after clicking
+  // "Add to Compare".
+  //
+  // Typical Magento 2 compare toast:
+  //   "You added [Product Name] to the comparison list."
+  //
+  // Returns true as soon as the message is visible (up to 10 s).
+  // Returns false if no message appears.
+  // ----------------------------------------------------------
+  async isCompareSuccessVisible() {
+    try {
+      await this.compareSuccessMessage.waitFor({ state: 'visible', timeout: 10000 });
+      const text = (await this.compareSuccessMessage.textContent()).trim();
+      console.log('PDPPage.isCompareSuccessVisible — message:', text);
+      return true;
+    } catch {
+      console.log('PDPPage.isCompareSuccessVisible — no success message found');
+      return false;
+    }
+  }
+  // ----------------------------------------------------------
+  // clickCompareProductsLink()
+  // ---------------------------
+  // Clicks the "Compare Products" button that appears in the compare
+  // sidebar block after at least one product has been added.
+  //
+  // WHAT HAPPENS NEXT:
+  //   The browser navigates to the compare list page at
+  //   /catalog/product_compare/index/ which shows a side-by-side
+  //   table of all products currently in the compare list.
+  // ----------------------------------------------------------
+  async clickCompareProductsLink() {
+    await this.compareProductsLink.waitFor({ state: 'visible', timeout: 10000 });
+    console.log('PDPPage.clickCompareProductsLink — clicking compare products list link');
+    await this.compareProductsLink.click();
+    await this.page.waitForLoadState('domcontentloaded');
+  }
+
+  // ----------------------------------------------------------
+  // isOnCompareListPage()
+  // ----------------------
+  // Returns true if the browser is currently on the compare list page.
+  //
+  // Magento 2 compare list URL contains "catalog/product_compare".
+  // ----------------------------------------------------------
+  async isOnCompareListPage() {
+    const url = this.page.url();
+    const result = url.includes('catalog/product_compare');
+    console.log('PDPPage.isOnCompareListPage — URL:', url, '→', result);
+    return result;
   }
 }
 
