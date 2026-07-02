@@ -264,10 +264,20 @@ class PDPPage extends BasePage {
     // "Add to Wish List" link.
     // Clicking POSTs to the wishlist endpoint and then REDIRECTS
     // the browser to the customer's wishlist page (/wishlist/index/index/).
+    //
+    // WHY SCOPE TO .product-addto-links FIRST:
+    //   The HAL UAE theme also renders a hidden <a class="action towishlist
+    //   minicart-wishlist-action"> inside the collapsed minicart header.
+    //   A plain `a.action.towishlist` selector matches THAT hidden element
+    //   first (it appears earlier in the DOM), making waitFor({ state: 'visible' })
+    //   time out even though the real PDP wishlist link is perfectly visible.
+    //   Scoping to .product-addto-links / .product-social-links ensures we
+    //   always target the PDP's own link, not the minicart's hidden one.
     this.wishlistButton = page.locator(
-      'a.action.towishlist, ' +
-      '[data-action="add-to-wishlist"], ' +
-      '.product-addto-links a[href*="wishlist"]'
+      '.product-addto-links a.action.towishlist, ' +
+      '.product-social-links a.action.towishlist, ' +
+      '.product-addto-links a[href*="wishlist"], ' +
+      '[data-action="add-to-wishlist"]'
     ).first();
 
     // "Add to Compare" link.
@@ -290,6 +300,106 @@ class PDPPage extends BasePage {
       '.block.block-compare .action.compare, ' +
       'a.action.compare[href*="compare"], ' +
       'a[href*="catalog/product_compare/index"]'
+    ).first();
+
+    // ============================================================
+    // SECTION 12: WISHLIST PAGE LOCATORS (/wishlist/index/index/)
+    // ============================================================
+    //
+    // When the user is on their wishlist page, each saved product
+    // appears as a product-item <li> card with two action buttons:
+    //   • "Add to Cart"  — submits a form to /checkout/cart/add/
+    //   • "Remove Item"  — navigates to /wishlist/index/remove/item/X/
+
+    // Every product card on the wishlist page.
+    // HAL UAE uses a custom layout — we target any card-level product item
+    // or fall back to the broad .product-item used by all Magento themes.
+    this.wishlistItems = page.locator(
+      '.wishlist-index-index .product-item, ' + // custom wishlist page class
+      '.items.wishlist .product-item, ' +        // standard Luma wishlist
+      'li.product-item'                          // broad fallback
+    );
+
+    // "Add to Cart" button on the FIRST wishlist item.
+    //
+    // WHY form[action*="cart/add"] button:
+    //   The HAL UAE theme uses non-standard CSS classes on the wishlist
+    //   add-to-cart button (different from standard Luma .tocart).
+    //   Targeting the enclosing <form> by its action URL is resilient to
+    //   any CSS class rename — the form action path is a Magento constant.
+    this.wishlistFirstAddToCart = page.locator(
+      'form[action*="cart/add"] button, ' +            // most reliable (form URL)
+      'button.tocart, ' +                              // standard Magento class
+      'button[title*="Add to Cart" i]'                 // title attribute fallback
+    ).first();
+
+    // "Remove Item" link on the FIRST wishlist item.
+    //
+    // WHY a.btn-remove[title="Remove Item"]:
+    //   HAL UAE's wishlist uses href="#" on the remove link (AJAX-driven),
+    //   so URL-based selectors like a[href*="wishlist/index/remove"] never match.
+    //   The class "btn-remove" with title "Remove Item" uniquely identifies the
+    //   visible per-item remove link (the hidden minicart uses title "Remove This Item").
+    this.wishlistFirstRemove = page.locator(
+      'a.btn-remove[title="Remove Item"], ' +   // HAL UAE wishlist item remove (AJAX)
+      'a[title="Remove Item"], ' +              // fallback without class constraint
+      'a[href*="wishlist/index/remove"], ' +    // standard Magento GET-based remove
+      'a[href*="wishlist/index/delete"]'        // older Magento variant
+    ).first();
+
+    // ============================================================
+    // SECTION 13: COMPARE LIST PAGE LOCATORS
+    // (/catalog/product_compare/index/)
+    // ============================================================
+    //
+    // The compare page renders products side-by-side in an HTML table.
+    // Each product column has:
+    //   • An "×" remove link at the top → removes that product from the list
+    //   • An "Add to Cart" button at the bottom
+    //   • An "Add to Wish List" link (if the theme adds it)
+    //
+    // We always target the FIRST product column (.first()) so these
+    // locators work even when only one product is in the compare list.
+
+    // "Add to Cart" button targeting the LAST product in the compare table.
+    // The compare table shows products newest-first, so the LAST button belongs
+    // to the oldest-added product (Almarai Fresh Cream — a simple product).
+    // Simple products add to cart immediately via AJAX; configurable products
+    // (like Dove, which appears FIRST) trigger a slow server-side redirect to
+    // the PDP that can take 40+ seconds on the staging server.
+    this.comparePageAddToCart = page.locator(
+      '.table-comparison button.tocart, ' +
+      'table.compare button.tocart, ' +
+      '.table-comparison .action.tocart, ' +
+      'form[action*="cart/add"] button'
+    ).last();
+
+    // "Add to Wish List" link for the first product in the compare table.
+    // Not all Magento themes include this on the compare page.
+    // The selector is intentionally broad to catch custom themes.
+    this.comparePageAddToWishlist = page.locator(
+      '.table-comparison a.towishlist, ' +
+      'table.compare a.towishlist, ' +
+      '.table-comparison a[href*="wishlist"]'
+    ).first();
+
+    // Remove (×) link for the first product in the compare table.
+    // Clicking this sends a GET to /catalog/product_compare/remove/product/X/
+    // and reloads the compare page with that product removed.
+    this.comparePageRemoveItem = page.locator(
+      '.table-comparison .action.delete, ' +
+      'table.compare a.action.delete, ' +
+      'a[href*="catalog/product_compare/remove"]'
+    ).first();
+
+    // Product name link for the FIRST product column in the compare table.
+    // Clicking it navigates to that product's PDP — used when we need to
+    // perform a PDP-only action (e.g. Add to Wish List) from the compare page.
+    this.compareFirstProductLink = page.locator(
+      '.table-comparison .product-item-name a, ' +
+      'table.compare .product-item-name a, ' +
+      '.table-comparison td.cell.product a.product-item-photo, ' +
+      '.table-comparison td a[href$=".html"]'
     ).first();
   }
 
@@ -1242,6 +1352,268 @@ class PDPPage extends BasePage {
     const result = url.includes('catalog/product_compare');
     console.log('PDPPage.isOnCompareListPage — URL:', url, '→', result);
     return result;
+  }
+
+
+  // ============================================================
+  // 12. CART UTILITY METHODS
+  // ============================================================
+
+  // ----------------------------------------------------------
+  // clearCart()
+  // ------------
+  // Navigates to the shopping cart page and deletes every item.
+  //
+  // WHY THIS IS NEEDED:
+  //   Tests that add products to cart accumulate cart state across
+  //   multiple test runs because the staging server persists the
+  //   logged-in user's cart between sessions.  When a product's
+  //   max-allowed-qty (e.g. 5) is already reached, subsequent
+  //   "Add to Cart" clicks silently fail with no success toast.
+  //   Calling clearCart() before any test that adds to cart ensures
+  //   the test starts from a predictable empty-cart state.
+  //
+  // HOW IT WORKS:
+  //   The cart page (/checkout/cart/) shows a "Remove item" (×) link
+  //   per row.  We click the first link repeatedly until the page
+  //   has no more delete buttons.  Each click reloads the cart.
+  //   A safety limit of 20 iterations prevents infinite loops.
+  // ----------------------------------------------------------
+  async clearCart() {
+    console.log('PDPPage.clearCart — navigating to cart page');
+    await this.page.goto('https://mcstaging2.hal-uae.com/checkout/cart/');
+    await this.waitForPageLoad();
+
+    // Delete links on the cart page — one per item row.
+    // WHY a.action-delete not a.action.delete:
+    //   HAL UAE's cart remove link has class="action action-delete".
+    //   The CSS selector a.action.delete matches two separate classes
+    //   "action" and "delete", but the actual class is the single
+    //   hyphenated name "action-delete" — so it never matches.
+    //   a.action-delete is the correct selector for this theme.
+    const deleteBtn = this.page.locator(
+      'a.action-delete[title="Remove item"], ' +  // HAL UAE cart (AJAX, href="#")
+      'a[title="Remove item"], ' +                // title-based fallback
+      '.cart.item .action.delete, ' +             // standard Magento 2 Luma
+      '.item-actions .action.delete'              // custom themes variant
+    ).first();
+
+    let safety = 20; // prevent infinite loop if DOM behaves unexpectedly
+    while (safety-- > 0) {
+      const hasItem = await deleteBtn.isVisible().catch(() => false);
+      if (!hasItem) break; // cart is empty — done
+
+      console.log('PDPPage.clearCart — removing one cart item');
+      await deleteBtn.click();
+
+      // Wait for the cart page to reload after deletion
+      await this.page.waitForLoadState('domcontentloaded');
+    }
+
+    console.log('PDPPage.clearCart — cart is now empty');
+  }
+
+
+  // ============================================================
+  // 13. WISHLIST PAGE METHODS
+  // ============================================================
+
+  // ----------------------------------------------------------
+  // goToWishlistPage()
+  // -------------------
+  // Navigates directly to the customer's wishlist page.
+  //
+  // URL: /wishlist/index/index/
+  // Magento redirects here automatically after clicking
+  // "Add to Wish List" on a PDP, but this method lets us
+  // navigate there directly at any point in a test.
+  // ----------------------------------------------------------
+  async goToWishlistPage() {
+    await this.page.goto('https://mcstaging2.hal-uae.com/wishlist/index/index/');
+    await this.waitForPageLoad(); // domcontentloaded via BasePage
+  }
+
+  // ----------------------------------------------------------
+  // getWishlistItemCount()
+  // -----------------------
+  // Returns the number of product cards currently in the wishlist.
+  //
+  // Returns 0 if the wishlist is empty or the items are not found.
+  // ----------------------------------------------------------
+  async getWishlistItemCount() {
+    try {
+      // Wait for at least one item to appear
+      await this.wishlistItems.first().waitFor({ state: 'visible', timeout: 5000 });
+      return await this.wishlistItems.count();
+    } catch {
+      return 0; // Empty wishlist or not on wishlist page
+    }
+  }
+
+  // ----------------------------------------------------------
+  // addFirstWishlistItemToCart()
+  // -----------------------------
+  // Clicks the "Add to Cart" button on the first product card
+  // in the wishlist.
+  //
+  // WHAT HAPPENS NEXT (Magento 2 standard behaviour):
+  //   Magento POSTs the form to /checkout/cart/add/ and then
+  //   either redirects to the shopping cart page OR reloads
+  //   the wishlist page with a success toast — depending on
+  //   the store's "Redirect to Cart" configuration.
+  //
+  //   After this call, check page.url() to know where you ended up.
+  // ----------------------------------------------------------
+  async addFirstWishlistItemToCart() {
+    // Wait for full page load so all form handlers are attached
+    await this.page.waitForLoadState('load');
+
+    // Wait for the Add to Cart button to be visible
+    await this.wishlistFirstAddToCart.waitFor({ state: 'visible', timeout: 10000 });
+
+    const btnText = await this.wishlistFirstAddToCart.textContent().catch(() => '');
+    console.log('PDPPage.addFirstWishlistItemToCart — clicking:', btnText.trim());
+
+    await this.wishlistFirstAddToCart.click();
+
+    // Wait for Magento to process the add-to-cart POST
+    await this.page.waitForLoadState('domcontentloaded');
+  }
+
+  // ----------------------------------------------------------
+  // removeFirstWishlistItem()
+  // --------------------------
+  // Clicks the "Remove Item" link on the first product card
+  // in the wishlist.
+  //
+  // WHAT HAPPENS NEXT:
+  //   Magento sends a GET to /wishlist/index/remove/item/X/ and
+  //   reloads the wishlist page. A success message appears:
+  //   "[Product Name] has been removed from your Wish List."
+  // ----------------------------------------------------------
+  async removeFirstWishlistItem() {
+    // Wait for the remove button to be visible
+    await this.wishlistFirstRemove.waitFor({ state: 'visible', timeout: 10000 });
+
+    console.log('PDPPage.removeFirstWishlistItem — clicking remove link');
+    await this.wishlistFirstRemove.click();
+
+    // Wait for the page to reload after removal
+    await this.page.waitForLoadState('domcontentloaded');
+  }
+
+
+  // ============================================================
+  // 13. COMPARE LIST PAGE METHODS
+  // ============================================================
+
+  // ----------------------------------------------------------
+  // goToCompareListPage()
+  // ----------------------
+  // Navigates directly to the compare list page.
+  //
+  // URL: /catalog/product_compare/index/
+  // This is the page that shows a side-by-side comparison table.
+  // ----------------------------------------------------------
+  async goToCompareListPage() {
+    await this.page.goto('https://mcstaging2.hal-uae.com/catalog/product_compare/index/');
+    await this.waitForPageLoad();
+  }
+
+  // ----------------------------------------------------------
+  // addFirstCompareItemToCart()
+  // ----------------------------
+  // Clicks the "Add to Cart" button for the first product column
+  // in the comparison table.
+  //
+  // WHAT HAPPENS NEXT:
+  //   Simple product → AJAX add, success toast, stays on compare page.
+  //   (We target the LAST button — always a simple product — to avoid the
+  //    40+ second configurable redirect on the staging server.)
+  // ----------------------------------------------------------
+  async addFirstCompareItemToCart() {
+    await this.page.waitForLoadState('load');
+
+    await this.comparePageAddToCart.waitFor({ state: 'visible', timeout: 10000 });
+
+    console.log('PDPPage.addFirstCompareItemToCart — clicking Add to Cart on compare page');
+    await this.comparePageAddToCart.click();
+
+    // Wait for the AJAX success toast (simple product stays on compare page)
+    await this.page.waitForLoadState('domcontentloaded');
+  }
+
+  // ----------------------------------------------------------
+  // addFirstCompareItemToWishlist()
+  // --------------------------------
+  // Clicks the "Add to Wish List" link for the first product
+  // column in the comparison table.
+  //
+  // WHAT HAPPENS NEXT:
+  //   Magento redirects to the customer's wishlist page
+  //   (/wishlist/index/index/) with a success message.
+  //
+  // NOTE: Not all Magento themes include a wishlist link on the
+  //   compare page. If the button is not found, this method throws.
+  // ----------------------------------------------------------
+  async addFirstCompareItemToWishlist() {
+    await this.page.waitForLoadState('load');
+
+    await this.comparePageAddToWishlist.waitFor({ state: 'visible', timeout: 10000 });
+
+    console.log('PDPPage.addFirstCompareItemToWishlist — clicking Add to Wish List on compare page');
+    await this.comparePageAddToWishlist.click();
+
+    // Magento redirects to wishlist page after adding
+    await this.page.waitForLoadState('domcontentloaded');
+  }
+
+  // ----------------------------------------------------------
+  // clickFirstCompareProductLink()
+  // --------------------------------
+  // Clicks the product name link for the first product column
+  // in the comparison table, navigating to that product's PDP.
+  //
+  // WHY THIS IS NEEDED:
+  //   The HAL UAE compare page does not include an "Add to Wish List"
+  //   button in the compare table. To add a compare-listed product to
+  //   the wishlist, we click through to its PDP and use the wishlist
+  //   link there — this is the standard user workflow.
+  //
+  // After calling this, use clickAddToWishlist() to add to the wishlist.
+  // ----------------------------------------------------------
+  async clickFirstCompareProductLink() {
+    await this.page.waitForLoadState('load');
+
+    await this.compareFirstProductLink.waitFor({ state: 'visible', timeout: 10000 });
+
+    const text = await this.compareFirstProductLink.textContent().catch(() => '');
+    console.log('PDPPage.clickFirstCompareProductLink — navigating to product:', text.trim());
+
+    await this.compareFirstProductLink.click();
+    await this.page.waitForLoadState('domcontentloaded');
+  }
+
+  // ----------------------------------------------------------
+  // removeFirstCompareItem()
+  // -------------------------
+  // Clicks the "×" remove link for the first product column
+  // in the comparison table.
+  //
+  // WHAT HAPPENS NEXT:
+  //   Magento sends a GET to /catalog/product_compare/remove/product/X/
+  //   and reloads the compare page with that product removed.
+  //   If it was the last product, the page shows "You have no items
+  //   to compare."
+  // ----------------------------------------------------------
+  async removeFirstCompareItem() {
+    await this.comparePageRemoveItem.waitFor({ state: 'visible', timeout: 10000 });
+
+    console.log('PDPPage.removeFirstCompareItem — clicking remove on compare page');
+    await this.comparePageRemoveItem.click();
+
+    // Wait for the page to reload after removal
+    await this.page.waitForLoadState('domcontentloaded');
   }
 }
 

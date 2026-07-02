@@ -46,17 +46,15 @@ module.exports = defineConfig({
     // will be relative to this. So goto('/') goes to the homepage.
     baseURL: 'https://mcstaging2.hal-uae.com',
 
-    // Take a screenshot automatically when a test fails.
-    // Helps you see what went wrong without running the test again.
-    screenshot: 'only-on-failure',
+    // Take a screenshot for every test, whether it passes or fails.
+    screenshot: 'on',
 
-    // Record a video when a test fails.
-    // You can replay it to understand what happened.
-    video: 'retain-on-failure',
+    // Record a video for every test, whether it passes or fails.
+    video: 'on',
 
-    // Capture a trace (detailed logs + screenshots) on first retry.
+    // Capture a full trace for every test so you can inspect step-by-step.
     // Open with: npx playwright show-trace trace.zip
-    trace: 'on-first-retry',
+    trace: 'on',
 
     // How long to wait for a single action (like a click) to complete.
     actionTimeout: 15000,
