@@ -205,6 +205,53 @@ class AuthPage extends BasePage {
 
 
   // ----------------------------------------------------------
+  // resendOTP()
+  // ------------
+  // Navigates back to the Auth0 OTP challenge page and clicks the
+  // "Resend" link so Auth0 sends a fresh OTP email.
+  //
+  // Call this when the OTP email has not arrived after waiting.
+  // After clicking Resend, wait ~20s before polling the inbox again.
+  // ----------------------------------------------------------
+  async resendOTP() {
+    if (!this.otpPageUrl) {
+      console.log('AuthPage.resendOTP — no OTP URL saved, skipping resend');
+      return;
+    }
+
+    console.log('AuthPage.resendOTP — navigating back to Auth0 OTP page');
+    try {
+      await this.page.goto(this.otpPageUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    } catch (e) {
+      console.log('AuthPage.resendOTP — could not navigate to OTP page:', e.message.split('\n')[0]);
+      return;
+    }
+    await this.page.waitForTimeout(2000);
+
+    // Auth0's resend link varies by tenant config — try several selectors
+    const resendBtn = this.page.locator(
+      'a:has-text("Resend"), button:has-text("Resend"), ' +
+      '[data-action="resend"], a:has-text("resend"), ' +
+      'span:has-text("Resend email")'
+    ).first();
+
+    try {
+      await resendBtn.waitFor({ state: 'visible', timeout: 8000 });
+      await resendBtn.click();
+      console.log('AuthPage.resendOTP — Resend clicked successfully');
+      await this.page.waitForTimeout(2000);
+    } catch {
+      console.log('AuthPage.resendOTP — Resend button not found on page, skipping');
+    }
+
+    // Auth0 may generate a new state URL after clicking Resend.
+    // Save the current URL so the next resendOTP() call navigates to the right page.
+    this.otpPageUrl = this.page.url();
+    console.log('AuthPage.resendOTP — updated OTP page URL:', this.otpPageUrl);
+  }
+
+
+  // ----------------------------------------------------------
   // isLoggedIn()
   // -------------
   // Returns true if the user is currently logged in on HAL UAE.

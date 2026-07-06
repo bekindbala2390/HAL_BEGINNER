@@ -490,7 +490,9 @@ class PLPPage extends BasePage {
   // isSuccessMessageVisible()
   // --------------------------
   // Returns true if the green "Added to cart" toast appears
-  // within 15 seconds of clicking Add to Cart.
+  // within 25 seconds of clicking Add to Cart.
+  //
+  // 25s (up from 15s) to handle slow staging server responses.
   //
   // Returns false if:
   //   - No toast appeared (likely a configurable product redirect)
@@ -498,7 +500,7 @@ class PLPPage extends BasePage {
   // ----------------------------------------------------------
   async isSuccessMessageVisible() {
     try {
-      await this.successMessage.waitFor({ state: 'visible', timeout: 15000 });
+      await this.successMessage.waitFor({ state: 'visible', timeout: 25000 });
       return true;
     } catch {
       return false;

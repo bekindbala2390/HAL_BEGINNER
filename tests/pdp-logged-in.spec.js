@@ -6,7 +6,7 @@
 // WHAT IS BEING TESTED:
 //
 //   ─── SETUP (beforeAll) ───────────────────────────────────────
-//   1. Fixed email sprint@mailnesia.com is used for login
+//   1. Fixed email sprint@mailinator.com is used for login
 //   2. The browser navigates to HAL UAE login → redirected to Auth0
 //   3. The mailinator email is entered on Auth0 → OTP email is sent
 //      The Auth0 OTP challenge URL is saved (contains session state)
@@ -98,7 +98,7 @@ test.describe('PDP — Logged-In User: Wishlist & Compare Suite', () => {
   // Fixed test email — uses a known mailinator.com public inbox.
   // The inbox "sprint" at mailinator.com receives the Auth0 OTP.
   // ----------------------------------------------------------
-  const testEmail = 'sprint@mailnesia.com';
+  const testEmail = 'haluaeqa@mailinator.com';
 
   // Shared variables declared at describe scope
   let page;       // single browser tab shared by ALL steps and tests
@@ -153,18 +153,18 @@ test.describe('PDP — Logged-In User: Wishlist & Compare Suite', () => {
     //   • auth.otpPageUrl holds the URL (we navigate back to it later)
     await auth.enterEmailAndSubmit(testEmail);
 
-    // ── STEP 4: Navigate the SAME PAGE to mailnesia to read OTP ─────
-    // openInbox() navigates the browser tab to mailnesia.com.
+    // ── STEP 4: Navigate the SAME PAGE to mailinator to read OTP ────
+    // openInbox() navigates the browser tab to mailinator.com.
     // Auth0's session cookies (scoped to auth0.com) survive this
     // because cookies are domain-scoped and not lost by navigation.
     await mailinator.openInbox(testEmail);
 
-    // Poll mailnesia by reloading until the OTP email arrives.
+    // Poll mailinator by reloading until the OTP email arrives.
     const emailArrived = await mailinator.waitForOTPEmail(90000);
     if (!emailArrived) {
       throw new Error(
         `beforeAll: OTP email did not arrive at ${testEmail} within 90s. ` +
-        `Check that Auth0 is delivering to mailnesia.com (screenshot in test-results/).`
+        `Check that Auth0 is delivering to mailinator.com (screenshot in test-results/).`
       );
     }
 
