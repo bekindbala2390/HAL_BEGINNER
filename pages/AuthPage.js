@@ -199,7 +199,7 @@ class AuthPage extends BasePage {
     await this.otpSubmitButton.click();
 
     // Wait for Auth0 to validate and redirect back to HAL UAE
-    await this.page.waitForURL('**/mcstaging2.hal-uae.com/**', { timeout: 45000 });
+    await this.page.waitForURL('**/mcstaging2.hal-uae.com/**', { timeout: 60000 });
     console.log('AuthPage.enterOTPAndSubmit — redirected to:', this.page.url());
   }
 

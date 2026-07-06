@@ -172,15 +172,22 @@ class MailinatorPage {
   // ----------------------------------------------------------
   async waitForOTPEmail(maxWaitMs = 300000, resendFn = null) {
     const pollEveryMs   = 5000;   // check inbox every 5 seconds
-    const resendAfterMs = 60000;  // click Resend only if no email after 60 seconds
-    const resendWaitMs  = 20000;  // wait 20 seconds after clicking Resend
+    const resendAfterMs = 75000;  // click Resend only if no email after 75 seconds
+    const resendWaitMs  = 30000;  // wait 30 seconds after clicking Resend
+    const maxResends    = 1;      // never resend more than once — each resend
+                                  // generates a NEW OTP that invalidates the old
+                                  // one; multiple resends cause OTP mismatch
 
-    const deadline        = Date.now() + maxWaitMs;
-    let   lastResendAt    = Date.now(); // track when we last triggered a resend
-    let   resendCount     = 0;
-    let   attempt         = 0;
+    const deadline      = Date.now() + maxWaitMs;
+    let   lastResendAt  = Date.now();
+    let   resendCount   = 0;
+    let   attempt       = 0;
+    // After a resend, only accept emails that arrived AFTER it.
+    // We track the inbox count at resend time so we can ignore
+    // delayed emails from a previous (now-invalid) resend.
+    let   resendBaseCount = null;
 
-    console.log(`MailinatorPage.waitForOTPEmail — checking mailinator, up to ${maxWaitMs / 1000}s (resend every ${resendAfterMs / 1000}s if no email)`);
+    console.log(`MailinatorPage.waitForOTPEmail — checking mailinator, up to ${maxWaitMs / 1000}s (resend once if no email after ${resendAfterMs / 1000}s)`);
 
     while (Date.now() < deadline) {
       attempt++;
@@ -201,31 +208,34 @@ class MailinatorPage {
       ).catch(() => {});
 
       const count = await this.emailRows.count().catch(() => 0);
-      console.log(
-        `MailinatorPage.waitForOTPEmail — inbox has ${count} row(s)`
-      );
+      console.log(`MailinatorPage.waitForOTPEmail — inbox has ${count} row(s)`);
 
-      // Always scan ALL rows for the OTP email on every poll.
-      // We do NOT gate on (count > initialEmailCount) because openInbox()
-      // is called after Auth0 sends the OTP, so the email may already be
-      // present in the initial snapshot — gating on count change would
-      // cause the loop to miss it entirely and keep resending forever.
-      const otpRow = await this._findOTPRow();
-      if (otpRow) {
-        console.log('MailinatorPage.waitForOTPEmail — OTP email found, opening it now');
-        return true;
+      // After a resend, only check for OTP once a NEW email arrives
+      // (count exceeds the count we had when we triggered the resend).
+      // This prevents us from reading a delayed email from an earlier,
+      // now-invalidated resend and entering a stale OTP on Auth0.
+      const postResendGate = resendBaseCount !== null && count <= resendBaseCount;
+      if (postResendGate) {
+        console.log(`MailinatorPage.waitForOTPEmail — waiting for new email after resend (have ${count}, need >${resendBaseCount})`);
+      } else {
+        const otpRow = await this._findOTPRow();
+        if (otpRow) {
+          console.log('MailinatorPage.waitForOTPEmail — OTP email found, opening it now');
+          return true;
+        }
       }
 
-      // ── Resend if email hasn't arrived within resendAfterMs ──────
-      if (resendFn && (Date.now() - lastResendAt) >= resendAfterMs) {
+      // ── Resend once if email hasn't arrived within resendAfterMs ─
+      if (resendFn && resendCount < maxResends && (Date.now() - lastResendAt) >= resendAfterMs) {
+        resendBaseCount = count; // snapshot count before the new OTP is sent
         resendCount++;
-        console.log(`MailinatorPage.waitForOTPEmail — no OTP yet, triggering resend #${resendCount}`);
-        await resendFn();                              // click Resend on Auth0
+        console.log(`MailinatorPage.waitForOTPEmail — no OTP yet, triggering resend #${resendCount} (base count: ${resendBaseCount})`);
+        await resendFn();
         lastResendAt = Date.now();
 
         console.log(`MailinatorPage.waitForOTPEmail — waiting ${resendWaitMs / 1000}s after resend...`);
-        await this.page.waitForTimeout(resendWaitMs).catch(() => {}); // wait 20s
-        continue; // skip the normal 5s poll delay and go straight to next check
+        await this.page.waitForTimeout(resendWaitMs).catch(() => {});
+        continue;
       }
 
       // Normal inter-poll wait

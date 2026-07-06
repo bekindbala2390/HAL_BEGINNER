@@ -80,6 +80,57 @@ class CartPage extends BasePage {
     // "View and Edit Cart" link inside the mini cart panel
     this.viewCartLink    = page.locator('a.action.viewcart, .block-minicart .action.viewcart');
 
+    // ── Mini cart item-level locators ─────────────────────────
+    // Each <li> product row inside the open flyout panel
+    this.miniCartItems      = page.locator('#minicart-content-wrapper li.item.product');
+
+    // Product name <a> links — one per row
+    this.miniCartItemNames  = page.locator('#minicart-content-wrapper .product-item-name a');
+
+    // Delete / Remove buttons — one per item
+    this.miniCartDeleteBtns = page.locator(
+      '#minicart-content-wrapper a.action.delete, ' +
+      '#minicart-content-wrapper button.action.delete'
+    );
+
+    // Edit buttons — navigate to the product's PDP
+    this.miniCartEditBtns   = page.locator('#minicart-content-wrapper a.action.edit');
+
+    // Qty number inputs — one per item
+    this.miniCartQtyInputs  = page.locator('#minicart-content-wrapper input.cart-item-qty');
+
+    // Per-item "Update" button that saves a changed qty
+    this.miniCartUpdateBtns = page.locator(
+      '#minicart-content-wrapper button.update-cart-item, ' +
+      '#minicart-content-wrapper .update-cart-item'
+    );
+
+    // "Proceed to Checkout" button in the mini cart footer
+    this.miniCartCheckoutBtn = page.locator(
+      '#minicart-content-wrapper button.action.primary.checkout, ' +
+      '.block-minicart button.checkout, ' +
+      '#minicart-content-wrapper .action.checkout'
+    );
+
+    // Subtotal price shown at the bottom of the mini cart panel
+    this.miniCartSubtotal   = page.locator(
+      '#minicart-content-wrapper .subtotal .price, ' +
+      '.block-minicart .subtotal .price'
+    );
+
+    // Empty-state message shown when the cart has no items
+    this.miniCartEmptyMsg   = page.locator(
+      '#minicart-content-wrapper .subtitle.empty, ' +
+      '.block-minicart .subtitle.empty, ' +
+      '#minicart-content-wrapper p.empty'
+    );
+
+    // Wishlist button per item (HAL UAE customisation — may not exist)
+    this.miniCartWishlistBtns = page.locator(
+      '#minicart-content-wrapper a.action.towishlist, ' +
+      '#minicart-content-wrapper .action.towishlist'
+    );
+
 
     // ========================================================
     // SECTION 2: CART ITEM TABLE (on /checkout/cart/ page)
@@ -1183,6 +1234,250 @@ class CartPage extends BasePage {
     } catch {
       return '0';
     }
+  }
+
+
+  // ===========================================================
+  // 13. MINI CART ITEM-LEVEL OPERATIONS
+  //
+  // These methods operate on the items INSIDE the open flyout
+  // panel. Always call openMiniCart() before using them.
+  // ===========================================================
+
+  // ----------------------------------------------------------
+  // getMiniCartItemNames()
+  // -----------------------
+  // Returns an array of product name strings currently visible
+  // in the open mini cart flyout.
+  // ----------------------------------------------------------
+  async getMiniCartItemNames() {
+    const names = [];
+    const count = await this.miniCartItemNames.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      const text = (await this.miniCartItemNames.nth(i).textContent().catch(() => '')).trim();
+      if (text) names.push(text);
+    }
+    return names;
+  }
+
+
+  // ----------------------------------------------------------
+  // getMiniCartItemsCount()
+  // ------------------------
+  // Returns the number of distinct product rows inside the
+  // open mini cart flyout (NOT the badge/counter number).
+  // ----------------------------------------------------------
+  async getMiniCartItemsCount() {
+    return await this.miniCartItems.count().catch(() => 0);
+  }
+
+
+  // ----------------------------------------------------------
+  // deleteMiniCartItemAtIndex(index)
+  // ---------------------------------
+  // Clicks the "Remove" (delete) button for the item at the
+  // given 0-based index inside the open mini cart flyout.
+  // Confirms any dialog that appears. Waits for the panel to
+  // update via AJAX before returning.
+  // ----------------------------------------------------------
+  async deleteMiniCartItemAtIndex(index = 0) {
+    const deleteBtn = this.miniCartDeleteBtns.nth(index);
+    await deleteBtn.waitFor({ state: 'visible', timeout: 8000 });
+    await deleteBtn.click();
+
+    // Some Magento themes show a "Are you sure?" dialog
+    const confirmBtn = this.page.locator(
+      '.modal-popup button.action-primary, ' +
+      'button:has-text("OK"), ' +
+      '.modal-footer button.action-accept'
+    );
+    try {
+      await confirmBtn.waitFor({ state: 'visible', timeout: 3000 });
+      await confirmBtn.click();
+    } catch { /* no confirmation dialog — proceed */ }
+
+    // Wait for the mini cart AJAX to finish updating
+    await this.page.waitForTimeout(2500);
+  }
+
+
+  // ----------------------------------------------------------
+  // getMiniCartItemQty(index)
+  // --------------------------
+  // Returns the current quantity value (as a number) for the
+  // item at the given index in the open mini cart flyout.
+  // Returns 0 if the input is not found.
+  // ----------------------------------------------------------
+  async getMiniCartItemQty(index = 0) {
+    try {
+      const input = this.miniCartQtyInputs.nth(index);
+      // Use 'attached' so hidden-by-CSS inputs are still readable
+      await input.waitFor({ state: 'attached', timeout: 5000 });
+      const val = await input.inputValue();
+      return parseInt(val, 10) || 0;
+    } catch {
+      return 0;
+    }
+  }
+
+
+  // ----------------------------------------------------------
+  // setMiniCartItemQty(index, newQty)
+  // ----------------------------------
+  // Changes the qty input for the item at the given index in
+  // the open mini cart flyout, then saves it by clicking the
+  // per-item "Update" button (or pressing Enter as fallback).
+  //
+  // After saving, waits 3 seconds for Magento's AJAX to update
+  // the subtotal and badge count before returning.
+  // ----------------------------------------------------------
+  async setMiniCartItemQty(index = 0, newQty) {
+    const input = this.miniCartQtyInputs.nth(index);
+    await input.waitFor({ state: 'attached', timeout: 5000 });
+
+    // Triple-click selects all existing text, then fill replaces it
+    await input.click({ clickCount: 3 });
+    await input.fill(String(newQty));
+
+    // Try the per-item Update button first.
+    // Magento only makes the button visible after the input value changes,
+    // so we wait briefly for it to appear before clicking.
+    const updateBtn = this.miniCartUpdateBtns.nth(index);
+    const hasUpdate = await updateBtn.count().catch(() => 0);
+    let clicked = false;
+    if (hasUpdate > 0) {
+      try {
+        await updateBtn.waitFor({ state: 'visible', timeout: 4000 });
+        await updateBtn.click();
+        clicked = true;
+      } catch { /* button stayed hidden — fall through to Enter */ }
+    }
+    if (!clicked) {
+      // Fallback: pressing Enter triggers the AJAX update in Magento
+      await input.press('Enter');
+    }
+
+    // Wait for AJAX to finish and the subtotal to recalculate
+    await this.page.waitForTimeout(3000);
+  }
+
+
+  // ----------------------------------------------------------
+  // getMiniCartSubtotal()
+  // ----------------------
+  // Returns the subtotal price string shown at the bottom of
+  // the open mini cart flyout (e.g. "AED 120.00").
+  // Returns null if not found.
+  // ----------------------------------------------------------
+  async getMiniCartSubtotal() {
+    try {
+      await this.miniCartSubtotal.waitFor({ state: 'visible', timeout: 5000 });
+      return (await this.miniCartSubtotal.textContent()).trim();
+    } catch {
+      return null;
+    }
+  }
+
+
+  // ----------------------------------------------------------
+  // clickMiniCartCheckout()
+  // ------------------------
+  // Clicks the "Proceed to Checkout" button inside the open
+  // mini cart flyout and waits for the checkout page to load.
+  // ----------------------------------------------------------
+  async clickMiniCartCheckout() {
+    await this.miniCartCheckoutBtn.waitFor({ state: 'visible', timeout: 8000 });
+    await this.miniCartCheckoutBtn.click();
+    await this.page.waitForLoadState('domcontentloaded');
+    await this.page.waitForTimeout(1500);
+  }
+
+
+  // ----------------------------------------------------------
+  // closeMiniCart()
+  // ----------------
+  // Closes the mini cart flyout by pressing Escape.
+  // ----------------------------------------------------------
+  async closeMiniCart() {
+    await this.page.keyboard.press('Escape');
+    await this.page.waitForTimeout(500);
+  }
+
+
+  // ----------------------------------------------------------
+  // isMiniCartEmpty()
+  // ------------------
+  // Returns true if the open mini cart flyout shows an empty
+  // state (no items / "no items in your shopping cart" text).
+  // ----------------------------------------------------------
+  async isMiniCartEmpty() {
+    // Primary check: Magento renders a .subtitle.empty element
+    const emptyVisible = await this.miniCartEmptyMsg
+      .waitFor({ state: 'visible', timeout: 8000 })
+      .then(() => true)
+      .catch(() => false);
+    if (emptyVisible) return true;
+
+    // Fallback: count product rows in the panel
+    const rowCount = await this.getMiniCartItemsCount();
+    return rowCount === 0;
+  }
+
+
+  // ----------------------------------------------------------
+  // deleteAllMiniCartItems()
+  // -------------------------
+  // Deletes every item from the open mini cart flyout one by
+  // one until no delete buttons remain.
+  // Safety cap: 15 iterations to prevent infinite loops.
+  // ----------------------------------------------------------
+  async deleteAllMiniCartItems() {
+    let safety = 15;
+    while (safety-- > 0) {
+      const btnCount = await this.miniCartDeleteBtns.count().catch(() => 0);
+      if (btnCount === 0) break;
+      await this.deleteMiniCartItemAtIndex(0);
+    }
+  }
+
+
+  // ----------------------------------------------------------
+  // getMiniCartEditLinkHref(index)
+  // -------------------------------
+  // Returns the href attribute of the "Edit" link for the item
+  // at the given index. The Edit link navigates to the PDP so
+  // the customer can change options before updating the cart.
+  // Returns null if the link is not found.
+  // ----------------------------------------------------------
+  async getMiniCartEditLinkHref(index = 0) {
+    try {
+      const editBtn = this.miniCartEditBtns.nth(index);
+      await editBtn.waitFor({ state: 'visible', timeout: 5000 });
+      return await editBtn.getAttribute('href');
+    } catch {
+      return null;
+    }
+  }
+
+
+  // ----------------------------------------------------------
+  // addMiniCartItemToWishlist(index)
+  // ---------------------------------
+  // Tries to find a wishlist button inside the mini cart panel
+  // for the item at the given index (HAL UAE custom feature).
+  // If the button exists, clicks it and waits for the page to
+  // respond, then returns true.
+  // Returns false if no wishlist button is found — the caller
+  // should fall back to the Edit → PDP → wishlist approach.
+  // ----------------------------------------------------------
+  async addMiniCartItemToWishlist(index = 0) {
+    const wishlistBtn = this.miniCartWishlistBtns.nth(index);
+    const count = await wishlistBtn.count().catch(() => 0);
+    if (count === 0) return false;
+
+    await wishlistBtn.click();
+    await this.page.waitForLoadState('domcontentloaded');
+    return true;
   }
 
 }
