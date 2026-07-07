@@ -212,8 +212,12 @@ class MailinatorPage {
 
       // After a resend, only check for OTP once a NEW email arrives
       // (count exceeds the count we had when we triggered the resend).
-      // This prevents us from reading a delayed email from an earlier,
-      // now-invalidated resend and entering a stale OTP on Auth0.
+      // If count drops BELOW the baseline (Mailinator deleted old emails),
+      // lower the baseline so we don't gate forever.
+      if (resendBaseCount !== null && count < resendBaseCount) {
+        console.log(`MailinatorPage.waitForOTPEmail — inbox shrank (${count} < ${resendBaseCount}), lowering baseline`);
+        resendBaseCount = count;
+      }
       const postResendGate = resendBaseCount !== null && count <= resendBaseCount;
       if (postResendGate) {
         console.log(`MailinatorPage.waitForOTPEmail — waiting for new email after resend (have ${count}, need >${resendBaseCount})`);

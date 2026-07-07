@@ -20,9 +20,9 @@ module.exports = defineConfig({
   // ---------------------------------------------------------
   // timeout: Maximum time (in milliseconds) a single test
   // is allowed to run before it is marked as failed.
-  // 30000ms = 30 seconds.
+  // 120000ms = 2 minutes — needed for checkout and payment flows.
   // ---------------------------------------------------------
-  timeout: 30000,
+  timeout: 120000,
 
   // ---------------------------------------------------------
   // retries: If a test fails, how many times should
