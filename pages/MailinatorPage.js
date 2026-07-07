@@ -301,29 +301,42 @@ class MailinatorPage {
       await this.firstEmailRow.click().catch(() => {});
     }
 
-    // Give the Angular viewer and iframe time to load
-    await this.page.waitForTimeout(4000).catch(() => {});
+    // Give the Angular viewer and iframe initial time to start loading
+    await this.page.waitForTimeout(3000).catch(() => {});
 
     let bodyText = '';
 
     // ── Strategy 1: Read from the email body iframe ──────────────
     // Mailinator renders the email inside an iframe with id="html_msg_body".
-    // In Playwright 1.43+, contentFrame() returns a FrameLocator (synchronous),
-    // so we use frameLocator.locator('body').innerText() instead of frame.evaluate().
+    // The iframe may take a few seconds to load its content — so we
+    // retry up to 4 times (every 3 s) before giving up.
     const iframeLocator = this.page.locator('iframe#html_msg_body');
-    try {
-      await iframeLocator.waitFor({ state: 'attached', timeout: 10000 });
-      const frameLocator = iframeLocator.contentFrame(); // synchronous — no await
-      bodyText = await frameLocator.locator('body').innerText({ timeout: 8000 });
-      console.log('MailinatorPage.getOTPFromLatestEmail — read from iframe, preview:',
-        bodyText.substring(0, 200).replace(/\s+/g, ' ')
-      );
-    } catch {
-      console.log('MailinatorPage.getOTPFromLatestEmail — iframe not found, falling back to page text');
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      try {
+        await iframeLocator.waitFor({ state: 'attached', timeout: 8000 });
+        const frameLocator = iframeLocator.contentFrame();
+        const text = await frameLocator.locator('body').innerText({ timeout: 6000 });
+
+        // Accept only if the text actually contains digits (i.e. the email body loaded)
+        if (text && /\d{4,}/.test(text)) {
+          bodyText = text;
+          console.log(`MailinatorPage.getOTPFromLatestEmail — iframe read OK (attempt ${attempt}), preview:`,
+            bodyText.substring(0, 200).replace(/\s+/g, ' ')
+          );
+          break;
+        }
+
+        console.log(`MailinatorPage.getOTPFromLatestEmail — iframe empty on attempt ${attempt}, retrying...`);
+      } catch {
+        console.log(`MailinatorPage.getOTPFromLatestEmail — iframe not ready on attempt ${attempt}`);
+      }
+
+      if (attempt < 4) await this.page.waitForTimeout(3000).catch(() => {});
     }
 
     // ── Strategy 2: Fallback — read from the full page body ──────
     if (!bodyText) {
+      console.log('MailinatorPage.getOTPFromLatestEmail — iframe gave no digits, falling back to page text');
       bodyText = await this.page.evaluate(
         () => document.body.innerText || document.body.textContent || ''
       );
