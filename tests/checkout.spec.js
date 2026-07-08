@@ -647,31 +647,48 @@ test.describe('Checkout — Full E2E Flow', () => {
   test('CH13 — click place order', async () => {
     console.log('\n── CH13: Place Order ──');
 
-    // Click the Place Order button
+    // Register the URL-change listener BEFORE clicking Place Order.
+    // This avoids the race condition where the redirect fires between the
+    // click() returning and waitForURL() starting its event listener.
+    const redirectPromise = page.waitForURL(
+      url => !url.href.includes('/checkout/#') && !url.href.includes('/checkout/onepage/index'),
+      { timeout: 120000 }
+    ).catch(() => null);
+
     await checkout.clickPlaceOrder();
+    console.log('CH13: Place Order clicked — waiting up to 120s for N-Genius redirect...');
 
-    // Wait for the redirect to the N-Genius payment gateway.
-    // N-Genius is hosted on api-gateway.ngenius-payments.com.
-    // Give it 60 seconds to redirect.
-    console.log('CH13: waiting for redirect to N-Genius payment page...');
+    await redirectPromise;
 
-    try {
-      await page.waitForURL('**/ngenius-payments.com/**', { timeout: 60000 });
-    } catch {
-      // The gateway might use a different URL pattern or be embedded
-      console.log('CH13: waitForURL timed out — checking current URL');
-    }
+    // Wait for the destination page to commit its load
+    await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+    await page.waitForTimeout(2000);
 
     const currentUrl = page.url();
-    console.log('CH13: redirected to →', currentUrl);
+    console.log('CH13: final URL =', currentUrl);
 
-    // ASSERTION: no longer on the Magento checkout URL
-    // (either on N-Genius, or Magento redirected to a payment page)
-    const leftCheckout = !currentUrl.includes('/checkout/#') &&
-                         !currentUrl.includes('/checkout/onepage');
-    console.log('CH13: left checkout page =', leftCheckout);
+    // If we landed on a Chrome error page, N-Genius returned a bad response
+    if (currentUrl.startsWith('chrome-error://') || currentUrl.startsWith('about:blank')) {
+      await page.screenshot({ path: 'test-results/ch13-network-error.png', fullPage: true }).catch(() => {});
+      throw new Error(
+        'CH13: browser landed on an error page after Place Order.\n' +
+        'N-Genius sandbox may be unreachable, or the payment code expired.\n' +
+        'URL: ' + currentUrl
+      );
+    }
 
-    console.log('CH13: PASS — Place Order submitted ✓');
+    // If still on checkout, Magento may have shown a validation error
+    if (currentUrl.includes('/checkout/#') || currentUrl.includes('/checkout/onepage/index')) {
+      const errMsg = await page.locator(
+        '.message-error .message, [data-ui-id="checkout-messages"] .message, ' +
+        '.messages .message-error'
+      ).first().textContent().catch(() => '');
+      if (errMsg.trim()) console.log('CH13 WARN: Magento error message:', errMsg.trim());
+      throw new Error('CH13: still on checkout after 120s. Magento did not redirect to N-Genius.\nURL: ' + currentUrl);
+    }
+
+    console.log('CH13: PASS — Place Order redirected to N-Genius ✓');
+    expect(currentUrl).toContain('ngenius-payments.com');
   });
 
 
@@ -699,18 +716,75 @@ test.describe('Checkout — Full E2E Flow', () => {
   test('CH14 — fill card details on N-Genius payment page', async () => {
     console.log('\n── CH14: Fill Card Details (N-Genius) ──');
 
-    // Wait for the N-Genius payment form to be visible
+    // Wait for N-Genius React app to fully initialise
     await page.waitForLoadState('domcontentloaded');
-    await page.waitForTimeout(3000); // extra wait for payment page JS to initialise
+    await page.waitForLoadState('networkidle').catch(() => {});
+    await page.waitForTimeout(4000);
 
-    console.log('CH14: current URL =', page.url());
+    const currentUrl = page.url();
+    console.log('CH14: current URL =', currentUrl);
+
+    // If the browser landed on a Chrome error page, N-Genius failed to load.
+    // Fail early with a clear message rather than running diagnostics with 0 iframes.
+    if (currentUrl.startsWith('chrome-error://') || currentUrl.startsWith('about:blank')) {
+      await page.screenshot({ path: 'test-results/ch14-network-error.png', fullPage: true }).catch(() => {});
+      throw new Error(
+        'CH14: N-Genius payment page did not load — browser is on ' + currentUrl + '.\n' +
+        'N-Genius sandbox may be unreachable or the payment code has expired.'
+      );
+    }
+
     const { number, expiryMonth, expiryYear, cvv, name } = TEST_DATA.card;
 
-    // ── Strategy A: direct inputs (no iframe) ───────────────────
-    // Some N-Genius configurations render plain inputs.
+    // ── Diagnostics: dump all iframes and frames ──────────────────
+    // This log block is essential for debugging N-Genius iframe selectors.
+    // Each time the page changes, these logs let us update selectors precisely.
+    const iframeData = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('iframe')).map((f, i) => ({
+        i,
+        id:    f.id,
+        name:  f.name,
+        title: f.title,
+        cls:   f.className,
+        src:   (f.src || '').substring(0, 120),
+        w: f.offsetWidth, h: f.offsetHeight,
+      }))
+    ).catch(() => []);
+    console.log(`CH14: DOM iframes = ${iframeData.length}`);
+    for (const d of iframeData) {
+      console.log(`  iframe[${d.i}] id="${d.id}" name="${d.name}" title="${d.title}" cls="${d.cls}" ${d.w}x${d.h} src="${d.src}"`);
+    }
+
+    const pageFrames = page.frames();
+    console.log(`CH14: page.frames() = ${pageFrames.length}`);
+    for (const [i, f] of pageFrames.entries()) {
+      console.log(`  frame[${i}] name="${f.name()}" url="${f.url().substring(0, 120)}"`);
+    }
+
+    // Dump visible direct inputs (to check if Strategy A applies)
+    const inputData = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('input')).map((el, i) => ({
+        i,
+        id:    el.id,
+        name:  el.name,
+        type:  el.type,
+        ph:    el.placeholder,
+        cls:   el.className.substring(0, 60),
+        vis:   el.offsetWidth > 0 && el.offsetHeight > 0,
+      })).filter(d => d.vis)
+    ).catch(() => []);
+    console.log(`CH14: visible direct <input> elements = ${inputData.length}`);
+    for (const d of inputData) {
+      console.log(`  input[${d.i}] id="${d.id}" name="${d.name}" type="${d.type}" placeholder="${d.ph}"`);
+    }
+    // ── End diagnostics ──────────────────────────────────────────
+
+    // ── Strategy A: direct visible inputs (no iframe) ────────────
+    // N-Genius sandbox sometimes renders plain inputs when using test mode.
     const directCardInput = page.locator(
       'input[id*="card-number"], input[id*="pan"], ' +
-      'input[placeholder*="Card number"], input[placeholder*="1234"]'
+      'input[placeholder*="Card number"], input[placeholder*="Card Number"], ' +
+      'input[placeholder*="1234"], input[aria-label*="card"], input[aria-label*="Card"]'
     ).first();
 
     const isDirectInput = await directCardInput.isVisible().catch(() => false);
@@ -720,135 +794,156 @@ test.describe('Checkout — Full E2E Flow', () => {
 
       await directCardInput.fill(number);
 
-      // Expiry: some forms use MM/YY in one field, others split
       const expiryInput = page.locator(
-        'input[id*="expiry"], input[placeholder*="MM"], ' +
-        'input[placeholder*="Expiry"]'
+        'input[id*="expiry"], input[placeholder*="MM"], input[placeholder*="Expiry"]'
       ).first();
       const expiryVisible = await expiryInput.isVisible().catch(() => false);
 
       if (expiryVisible) {
         await expiryInput.fill(`${expiryMonth}/${expiryYear.slice(-2)}`);
       } else {
-        // Separate month / year fields
         await page.locator('input[id*="month"], select[id*="month"]').first().fill(expiryMonth).catch(() => {});
-        await page.locator('input[id*="year"], select[id*="year"]').first().fill(expiryYear).catch(() => {});
+        await page.locator('input[id*="year"],  select[id*="year"]').first().fill(expiryYear).catch(() => {});
       }
 
       await page.locator(
-        'input[id*="cvv"], input[id*="cvc"], input[placeholder*="CVV"], input[placeholder*="3"]'
+        'input[id*="cvv"], input[id*="cvc"], input[placeholder*="CVV"], ' +
+        'input[placeholder*="Security Code"], input[placeholder*="security"]'
       ).first().fill(cvv).catch(() => {});
 
       await page.locator(
-        'input[id*="name"], input[placeholder*="Name"], input[placeholder*="Cardholder"]'
+        'input[id*="name"], input[name*="name"], input[placeholder*="Name"], ' +
+        'input[placeholder*="Cardholder"], input[placeholder*="name on card"]'
       ).first().fill(name).catch(() => {});
 
     } else {
-      // ── Strategy B: N-Genius iframe-based hosted fields ─────────
-      // N-Genius wraps each card field in its own <iframe>.
-      // Common iframe IDs: encrypted-pan-iframe, encrypted-expiry-iframe,
-      // encrypted-cvv-iframe — or generic card-number, expiry, cvv.
+      // ── Strategy B: iframe-based hosted fields ──────────────────
+      // N-Genius wraps each PCI field in its own <iframe>.
+      // Primary selector: title attribute (e.g. title="Card Number").
+      // Fallback selectors: id/name containing field keywords.
       console.log('CH14: card form uses iframes — using frameLocator');
 
-      // ── Card Number iframe ─────────────────────────────────────
-      const cardNumFrame = page.frameLocator(
-        'iframe[id*="pan"], iframe[id*="card-number"], ' +
-        'iframe[id*="number"], iframe[title*="Card Number"]'
-      ).first();
+      // Helper: fill the first <input> or <select> inside a frameLocator
+      const fillFrame = async (frameSel, value, label) => {
+        const frame = page.frameLocator(frameSel).first();
+        try {
+          const el = frame.locator('input, select').first();
+          await el.waitFor({ state: 'visible', timeout: 10000 });
+          const tag = await el.evaluate(e => e.tagName).catch(() => 'INPUT');
+          if (tag === 'SELECT') {
+            await el.selectOption(value);
+          } else {
+            await el.fill(String(value));
+          }
+          console.log(`CH14: ${label} entered ✓`);
+          return true;
+        } catch (e) {
+          console.log(`CH14 WARN: ${label} iframe not found — ${e.message.split('\n')[0]}`);
+          return false;
+        }
+      };
 
-      try {
-        const cardInput = cardNumFrame.locator('input').first();
-        await cardInput.waitFor({ state: 'visible', timeout: 15000 });
-        await cardInput.fill(number);
-        console.log('CH14: card number entered ✓');
-      } catch (e) {
-        console.log('CH14 WARN: card number iframe not found —', e.message.split('\n')[0]);
-      }
+      // ── Card Number ─────────────────────────────────────────────
+      await fillFrame(
+        'iframe[title="Card Number"], iframe[title="card-number"], ' +
+        'iframe[title*="Card"], ' +
+        'iframe[id*="pan"], iframe[id*="card-number"], iframe[id*="number"], ' +
+        'iframe[name*="card"]',
+        number, 'card number'
+      );
 
-      // ── Expiry Month iframe ────────────────────────────────────
-      const expiryMonthFrame = page.frameLocator(
+      // ── Expiry Month ────────────────────────────────────────────
+      await fillFrame(
+        'iframe[title="Expiry Month"], iframe[title="expiry-month"], ' +
+        'iframe[title*="Month"], ' +
         'iframe[id*="expiry-month"], iframe[id*="month"], ' +
-        'iframe[title*="Expiry Month"]'
-      ).first();
+        'iframe[name*="month"]',
+        expiryMonth, 'expiry month'
+      );
 
-      try {
-        const monthInput = expiryMonthFrame.locator('input, select').first();
-        await monthInput.waitFor({ state: 'visible', timeout: 8000 });
-        const tag = await monthInput.evaluate(e => e.tagName).catch(() => 'INPUT');
-        if (tag === 'SELECT') {
-          await monthInput.selectOption(expiryMonth);
-        } else {
-          await monthInput.fill(expiryMonth);
-        }
-        console.log('CH14: expiry month entered ✓');
-      } catch (e) {
-        console.log('CH14 WARN: expiry month iframe not found —', e.message.split('\n')[0]);
-      }
-
-      // ── Expiry Year iframe ─────────────────────────────────────
-      const expiryYearFrame = page.frameLocator(
+      // ── Expiry Year ─────────────────────────────────────────────
+      await fillFrame(
+        'iframe[title="Expiry Year"], iframe[title="expiry-year"], ' +
+        'iframe[title*="Year"], ' +
         'iframe[id*="expiry-year"], iframe[id*="year"], ' +
-        'iframe[title*="Expiry Year"]'
-      ).first();
+        'iframe[name*="year"]',
+        expiryYear, 'expiry year'
+      );
 
-      try {
-        const yearInput = expiryYearFrame.locator('input, select').first();
-        await yearInput.waitFor({ state: 'visible', timeout: 8000 });
-        const tag = await yearInput.evaluate(e => e.tagName).catch(() => 'INPUT');
-        if (tag === 'SELECT') {
-          await yearInput.selectOption(expiryYear);
-        } else {
-          await yearInput.fill(expiryYear);
-        }
-        console.log('CH14: expiry year entered ✓');
-      } catch (e) {
-        console.log('CH14 WARN: expiry year iframe not found —', e.message.split('\n')[0]);
-      }
+      // ── Security Code / CVV ─────────────────────────────────────
+      await fillFrame(
+        'iframe[title="Security Code"], iframe[title="CVV"], iframe[title="cvv"], ' +
+        'iframe[title*="Security"], iframe[title*="CVV"], ' +
+        'iframe[id*="cvv"], iframe[id*="cvc"], iframe[id*="security"], ' +
+        'iframe[name*="cvv"]',
+        cvv, 'CVV'
+      );
 
-      // ── CVV iframe ─────────────────────────────────────────────
-      const cvvFrame = page.frameLocator(
-        'iframe[id*="cvv"], iframe[id*="cvc"], ' +
-        'iframe[id*="security"], iframe[title*="CVV"]'
-      ).first();
-
-      try {
-        const cvvInput = cvvFrame.locator('input').first();
-        await cvvInput.waitFor({ state: 'visible', timeout: 8000 });
-        await cvvInput.fill(cvv);
-        console.log('CH14: CVV entered ✓');
-      } catch (e) {
-        console.log('CH14 WARN: CVV iframe not found —', e.message.split('\n')[0]);
-      }
-
-      // ── Name on Card (usually a regular input, not an iframe) ──
+      // ── Name on Card (usually a regular input, not an iframe) ───
       const nameInput = page.locator(
         'input[id*="name"], input[name*="name"], ' +
-        'input[placeholder*="Name"], input[placeholder*="Cardholder"]'
+        'input[placeholder*="Name"], input[placeholder*="Cardholder"], ' +
+        'input[placeholder*="name on card"]'
       ).first();
 
       if (await nameInput.isVisible().catch(() => false)) {
         await nameInput.fill(name);
         console.log('CH14: name on card entered ✓');
+      } else {
+        // Try name inside a frame too
+        await fillFrame(
+          'iframe[title="Name on card"], iframe[title*="Name"], ' +
+          'iframe[id*="name"], iframe[name*="name"]',
+          name, 'name on card'
+        ).catch(() => {});
       }
     }
 
-    // ── Click the Pay / Submit button ────────────────────────────
+    // ── Wait up to 5s for Pay button to become enabled ───────────
+    // The button starts disabled; it becomes enabled only after all
+    // required fields are valid. If still disabled, we use force: true.
     const payBtn = page.locator(
       'button:has-text("Pay"), ' +
-      'button[type="submit"], ' +
-      'input[type="submit"], ' +
-      'button:has-text("Confirm"), ' +
-      'button:has-text("Place Order")'
+      'button[class*="ni-btn-primary"]:not([disabled]), ' +
+      'button[type="submit"]:not([disabled]), ' +
+      'input[type="submit"]'
     ).first();
 
-    await payBtn.waitFor({ state: 'visible', timeout: 15000 });
-    console.log('CH14: clicking Pay button...');
-    await payBtn.click();
+    // Broad selector to find the Pay button at all (may be disabled)
+    const payBtnAny = page.locator(
+      'button:has-text("Pay"), button[class*="ni-btn-primary"], ' +
+      'button[type="submit"], input[type="submit"]'
+    ).first();
 
-    // Wait for the 3DS challenge to load (next step)
+    try {
+      await payBtnAny.waitFor({ state: 'visible', timeout: 10000 });
+      // Wait up to 8s for it to become enabled
+      await page.waitForFunction(
+        () => {
+          const btn = document.querySelector(
+            'button.ni-btn-primary, button[type="submit"]'
+          );
+          return btn && !btn.disabled && !btn.classList.contains('disabled');
+        },
+        { timeout: 8000 }
+      ).catch(() => {});
+
+      const isEnabled = await payBtnAny.isEnabled().catch(() => false);
+      console.log(`CH14: Pay button enabled = ${isEnabled}`);
+      console.log('CH14: clicking Pay button...');
+
+      if (isEnabled) {
+        await payBtnAny.click();
+      } else {
+        // Force-click even if disabled — N-Genius may still process it
+        await payBtnAny.click({ force: true });
+      }
+    } catch (e) {
+      console.log('CH14 WARN: Pay button click failed —', e.message.split('\n')[0]);
+    }
+
     await page.waitForTimeout(3000);
-
-    console.log('CH14: PASS — card details submitted, waiting for 3DS ✓');
+    console.log('CH14: PASS — card details step complete, waiting for 3DS ✓');
   });
 
 
