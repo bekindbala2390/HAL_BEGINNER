@@ -76,6 +76,17 @@ module.exports = defineConfig({
         ...devices['Desktop Chrome'],
       },
     },
+
+    // Firefox is needed for the checkout/payment tests because the
+    // N-Genius sandbox payment page has an HTTP/2 bug that Chromium
+    // rejects with ERR_HTTP2_PROTOCOL_ERROR.  Firefox's HTTP/2 stack
+    // handles the server correctly.
+    {
+      name: 'firefox',
+      use: {
+        ...devices['Desktop Firefox'],
+      },
+    },
   ],
 
 });

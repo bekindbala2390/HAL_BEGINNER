@@ -647,6 +647,15 @@ test.describe('Checkout — Full E2E Flow', () => {
   test('CH13 — click place order', async () => {
     console.log('\n── CH13: Place Order ──');
 
+    // Capture every failed request so we can log the exact Chrome error code
+    // (e.g. ERR_NAME_NOT_RESOLVED, ERR_CONNECTION_REFUSED) when chrome-error:// appears.
+    const failedRequests = [];
+    const onFail = req => failedRequests.push({
+      url:     req.url().substring(0, 120),
+      failure: req.failure()?.errorText || 'unknown',
+    });
+    page.on('requestfailed', onFail);
+
     // Register the URL-change listener BEFORE clicking Place Order.
     // This avoids the race condition where the redirect fires between the
     // click() returning and waitForURL() starting its event listener.
@@ -664,16 +673,30 @@ test.describe('Checkout — Full E2E Flow', () => {
     await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
     await page.waitForTimeout(2000);
 
+    page.off('requestfailed', onFail);
+
     const currentUrl = page.url();
     console.log('CH13: final URL =', currentUrl);
 
-    // If we landed on a Chrome error page, N-Genius returned a bad response
+    // Log any request failures to help diagnose chrome-error:// cases
+    if (failedRequests.length > 0) {
+      console.log('CH13: failed requests during Place Order:');
+      for (const r of failedRequests) {
+        console.log(`  ${r.failure} → ${r.url}`);
+      }
+    }
+
+    // If we landed on a Chrome error page, log failures and fail clearly
     if (currentUrl.startsWith('chrome-error://') || currentUrl.startsWith('about:blank')) {
       await page.screenshot({ path: 'test-results/ch13-network-error.png', fullPage: true }).catch(() => {});
+      const failSummary = failedRequests
+        .filter(r => r.url.includes('ngenius') || r.url.includes('paypage'))
+        .map(r => `${r.failure} → ${r.url}`)
+        .join('\n  ') || '(no ngenius requests logged)';
       throw new Error(
         'CH13: browser landed on an error page after Place Order.\n' +
         'N-Genius sandbox may be unreachable, or the payment code expired.\n' +
-        'URL: ' + currentUrl
+        'Failed requests:\n  ' + failSummary + '\nURL: ' + currentUrl
       );
     }
 
