@@ -73,6 +73,8 @@
 // ── IMPORTS ──────────────────────────────────────────────────
 // We import the test runner and expect function from Playwright
 const { test, expect } = require('@playwright/test');
+const fs   = require('fs');
+const path = require('path');
 
 // Import each Page Object — one per page of the website
 const { PLPPage }        = require('../pages/PLPPage');        // Product Listing Page
@@ -80,6 +82,12 @@ const { PDPPage }        = require('../pages/PDPPage');        // Product Detail
 const { CartPage }       = require('../pages/CartPage');       // Shopping Cart page
 const { AuthPage }       = require('../pages/AuthPage');       // Login / Auth0 flow
 const { MailinatorPage } = require('../pages/MailinatorPage'); // Mailinator OTP reader
+
+// Path to the shared browser session file (same file used by checkout.spec.js).
+// If this file exists from a previous run, cookies are loaded and OTP is skipped.
+// Delete this file (or set FORCE_LOGIN=true) to force a fresh OTP login.
+const AUTH_STATE_FILE = path.join(__dirname, '..', 'auth-state.json');
+const OTP_URL_FILE    = path.join(__dirname, '..', 'otp-url.txt');
 
 
 // ============================================================
@@ -102,7 +110,7 @@ const TEST_DATA = {
   // Auth0 will send a 6-digit OTP to this Mailinator inbox.
   email: 'kp.abhinand.seller@mailinator.com',
 
-  // MOCK_OTP: if set (via env var), skips Mailinator and uses this value directly.
+  // MOCK_OTP: if set (via env var), skips Gmail and uses this value directly.
   // This is useful for fast re-runs when you already have the OTP.
   mockOtp: process.env.MOCK_OTP || null,
 
@@ -165,12 +173,13 @@ test.describe('Cart Flow — Complete E2E Shopping Cart Validation', () => {
   //   - Each test can read or update them as needed
   // ============================================================
 
-  let page;         // The single browser tab shared by all tests
-  let plp;          // PLPPage object — for the All Products listing
-  let pdp;          // PDPPage object — for individual product pages
-  let cart;         // CartPage object — for the shopping cart page
-  let auth;         // AuthPage object — for the Auth0 login flow
-  let mailinator;   // MailinatorPage object — for reading OTP from Mailinator
+  let browserContext; // The browser context that holds saved cookies
+  let page;           // The single browser tab shared by all tests
+  let plp;            // PLPPage object — for the All Products listing
+  let pdp;            // PDPPage object — for individual product pages
+  let cart;           // CartPage object — for the shopping cart page
+  let auth;           // AuthPage object — for the Auth0 login flow
+  let mailinator;     // MailinatorPage object — for reading OTP from Mailinator
 
   // URLs of simple (non-configurable) products found on the PLP.
   // beforeAll discovers these, and C01 + C02 use them.
@@ -190,11 +199,15 @@ test.describe('Cart Flow — Complete E2E Shopping Cart Validation', () => {
   //   STEP 4: Scan PLP to find 2 simple product URLs
   // ============================================================
   test.beforeAll(async ({ browser }) => {
-    test.setTimeout(240000); // 4 minutes for the entire setup
+    test.setTimeout(480000); // 8 min: OTP can take up to 5 min + cart setup
 
-    // ── STEP 1: Create the shared browser page ──────────────────
-    // All 18 tests will share this single page object.
-    page       = await browser.newPage();
+    // ── STEP 1: Create the shared browser context + page ────────
+    // If auth-state.json exists from a previous run (checkout spec or this
+    // spec), load its cookies so we arrive already logged in.
+    const stateExists   = fs.existsSync(AUTH_STATE_FILE) && !process.env.FORCE_LOGIN;
+    const contextOpts   = stateExists ? { storageState: AUTH_STATE_FILE } : {};
+    browserContext = await browser.newContext(contextOpts);
+    page       = await browserContext.newPage();
     plp        = new PLPPage(page);
     pdp        = new PDPPage(page);
     cart       = new CartPage(page);
@@ -202,83 +215,99 @@ test.describe('Cart Flow — Complete E2E Shopping Cart Validation', () => {
     mailinator = new MailinatorPage(page);
 
     console.log('\n=== CART SPEC SETUP: STARTING ===');
-    console.log('Login email   :', TEST_DATA.email);
-    console.log('MOCK_OTP mode :', TEST_DATA.mockOtp ? 'YES (' + TEST_DATA.mockOtp + ')' : 'NO (reading from Mailinator)');
+    console.log('Login email     :', TEST_DATA.email);
+    console.log('Saved auth state:', stateExists ? AUTH_STATE_FILE : 'none — full OTP login required');
+    console.log('MOCK_OTP mode   :', TEST_DATA.mockOtp ? 'YES (' + TEST_DATA.mockOtp + ')' : 'NO (Mailinator)');
 
 
-    // ── STEP 2A: Start the Auth0 login flow ─────────────────────
-    // Visit the HAL UAE login page. Auth0 will redirect the browser
-    // to hal-uae.eu.auth0.com where we enter our email.
-    await auth.navigateToLogin();
+    // ── STEP 2: Login (skip if saved session is still valid) ─────
+    let loggedIn = false;
 
-    // Enter the email address → Auth0 sends a 6-digit OTP to that inbox
-    await auth.enterEmailAndSubmit(TEST_DATA.email);
-
-
-    // ── STEP 2B: Get the OTP ────────────────────────────────────
-    let otp;
-
-    if (TEST_DATA.mockOtp) {
-      // ─── MOCKED MODE: user supplied the OTP via env var ─────────
-      // Skip Gmail entirely. Use the pre-set OTP value.
-      otp = TEST_DATA.mockOtp;
-      console.log('Setup: using MOCK_OTP:', otp);
-
-    } else {
-      // ─── MAILINATOR MODE: read OTP from the mailinator.com inbox ─
-
-      // Navigate the SAME browser tab to Mailinator.
-      // The Auth0 cookies (scoped to auth0.com) survive this navigation,
-      // so we can return to Auth0 afterwards without losing the session.
-      await mailinator.openInbox(TEST_DATA.email);
-
-      // Poll the Mailinator inbox until the Auth0 email arrives.
-      // If the email doesn't arrive within 20s, automatically click
-      // the Auth0 Resend button and wait 20s before trying again.
-      // Total timeout is 5 minutes to allow for multiple resend attempts.
-      const emailArrived = await mailinator.waitForOTPEmail(
-        300000,
-        () => auth.resendOTP()
-      );
-
-      if (!emailArrived) {
-        throw new Error(
-          `Setup: OTP email did not arrive at ${TEST_DATA.email} within 5 minutes (with resend retries).\n` +
-          `TIP: Set MOCK_OTP env var to bypass Mailinator:\n` +
-          `  $env:MOCK_OTP = "123456"`
-        );
+    if (stateExists) {
+      // Navigate to login page — if the Magento session is still alive,
+      // Magento redirects away (to /customer/account/ or similar).
+      // Any redirect away from the login URL means the session is valid.
+      await page.goto('https://mcstaging2.hal-uae.com/customer/account/login/');
+      await page.waitForLoadState('domcontentloaded').catch(() => {});
+      const landedUrl = page.url();
+      if (!landedUrl.includes('/login') && landedUrl.includes('mcstaging2.hal-uae.com')) {
+        loggedIn = true;
+        console.log('Setup: saved session valid — redirected to:', landedUrl);
+      } else {
+        loggedIn = await auth.isLoggedIn();
+        console.log('Setup: saved session valid =', loggedIn);
       }
-
-      // Open the email and extract the 6-digit OTP from its body
-      otp = await mailinator.getOTPFromLatestEmail();
-
-      if (!otp) {
-        throw new Error(
-          `Setup: Mailinator email arrived but OTP not found in email body.\n` +
-          `TIP: Check MailinatorPage.getOTPFromLatestEmail() regex, or use MOCK_OTP.`
-        );
-      }
-
-      console.log('Setup: OTP extracted from Mailinator →', otp);
     }
 
-
-    // ── STEP 2C: Return to Auth0 and enter the OTP ──────────────
-    // Navigate back to the Auth0 OTP challenge page (saved URL).
-    await auth.navigateBackToOTPPage();
-
-    // Enter the OTP → Auth0 validates it and redirects back to HAL UAE
-    await auth.enterOTPAndSubmit(otp);
-
-    // Confirm we are now logged in on the HAL UAE website
-    const loggedIn = await auth.isLoggedIn();
-    console.log('Setup: logged in =', loggedIn);
-
     if (!loggedIn) {
-      throw new Error(
-        `Setup: Login failed. Current URL: ${page.url()}\n` +
-        `If the OTP expired, re-run (or try MOCK_OTP with a fresh code).`
-      );
+      // ── STEP 2A: Trigger Auth0 OTP (or reuse saved URL) ───────
+      const hasSavedUrl = fs.existsSync(OTP_URL_FILE);
+      const urlAge      = hasSavedUrl
+        ? Date.now() - fs.statSync(OTP_URL_FILE).mtimeMs
+        : Infinity;
+      const reuseUrl    = TEST_DATA.mockOtp && hasSavedUrl && urlAge < 8 * 60 * 1000;
+
+      if (reuseUrl) {
+        auth.otpPageUrl = fs.readFileSync(OTP_URL_FILE, 'utf8').trim();
+        fs.unlinkSync(OTP_URL_FILE);
+        console.log('Setup: reusing saved OTP challenge URL (age', Math.round(urlAge / 1000), 's)');
+      } else {
+        if (!TEST_DATA.mockOtp) {
+          // Open Mailinator inbox BEFORE triggering Auth0 so openInbox()
+          // snapshots the current email count as a baseline.
+          console.log('Setup: opening Mailinator inbox before triggering Auth0 OTP...');
+          await mailinator.openInbox(TEST_DATA.email);
+        }
+
+        // Trigger Auth0 OTP (sends email to Mailinator inbox)
+        await auth.navigateToLogin();
+        await auth.enterEmailAndSubmit(TEST_DATA.email);
+
+        if (TEST_DATA.mockOtp) {
+          fs.writeFileSync(OTP_URL_FILE, auth.otpPageUrl, 'utf8');
+          console.log('Setup: OTP URL saved — check Mailinator for the NEW code, then re-run with MOCK_OTP.');
+        }
+      }
+
+      // ── STEP 2B: Get the OTP ──────────────────────────────────
+      let otp;
+
+      if (TEST_DATA.mockOtp) {
+        otp = TEST_DATA.mockOtp;
+        console.log('Setup: using MOCK_OTP →', otp);
+
+      } else {
+        // Poll Mailinator for the OTP email (no login needed — public inbox).
+        const emailArrived = await mailinator.waitForOTPEmail(300000);
+
+        if (!emailArrived) {
+          throw new Error(
+            `Setup: OTP email did not arrive at ${TEST_DATA.email} within 5 min.\n` +
+            `TIP: $env:MOCK_OTP = "123456"  then re-run.`
+          );
+        }
+
+        otp = await mailinator.getOTPFromLatestEmail();
+        if (!otp) throw new Error('Setup: email arrived but OTP not found in body.');
+        console.log('Setup: OTP extracted from Mailinator →', otp);
+      }
+
+      // ── STEP 2C: Complete login ────────────────────────────────
+      await auth.navigateBackToOTPPage();
+      await auth.enterOTPAndSubmit(otp);
+
+      loggedIn = await auth.isLoggedIn();
+      console.log('Setup: logged in =', loggedIn);
+      if (!loggedIn) {
+        throw new Error(
+          `Setup: Login failed. Current URL: ${page.url()}\n` +
+          `If the OTP expired, re-run (or use MOCK_OTP with a fresh code).`
+        );
+      }
+
+      // ── STEP 2D: Save cookies so the next run skips OTP ──────
+      await browserContext.storageState({ path: AUTH_STATE_FILE });
+      console.log('Setup: auth state saved →', AUTH_STATE_FILE);
     }
 
 

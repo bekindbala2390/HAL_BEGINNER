@@ -229,8 +229,10 @@ class PLPPage extends BasePage {
     // Step 3: Click the link via browser-side JavaScript
     await this.allProductsNavLink.evaluate(el => el.click());
 
-    // Step 4: Wait until the URL changes to the PLP
-    await this.page.waitForURL(/all-products/, { timeout: 15000 });
+    // Step 4: Wait until the URL changes to the PLP.
+    // Use domcontentloaded so Firefox doesn't time out waiting for the
+    // load event, which can hang on heavy Magento category pages.
+    await this.page.waitForURL(/all-products/, { timeout: 15000, waitUntil: 'domcontentloaded' });
     await this.waitForPageLoad();
   }
 

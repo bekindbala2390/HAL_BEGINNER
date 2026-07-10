@@ -77,17 +77,27 @@ class CheckoutPage extends BasePage {
     this.modalLastName  = page.locator('.modal-content input[name="lastname"]');
     this.modalPhone     = page.locator('.modal-content input[name="telephone"]');
     this.modalStreet    = page.locator('.modal-content input[name="street[0]"]');
-    this.modalCity      = page.locator('.modal-content input[name="city"]');
+
+    // City has NO name/id attribute on this site — it is a KnockoutJS
+    // <select> dropdown (not a text input). Its wrapper <div> carries
+    // name="shippingAddress.city", which is the only reliable hook.
+    this.modalCity       = page.locator('.modal-content input[name="city"]'); // fallback for text-input themes
+    this.modalCitySelect = page.locator('.modal-content div[name="shippingAddress.city"] select');
+
     this.modalCountry   = page.locator('.modal-content select[name="country_id"]');
     this.modalRegion    = page.locator('.modal-content select[name="region_id"]');
     this.modalRegionTxt = page.locator('.modal-content input[name="region"]');
+
+    // NOTE: on this UAE site, Magento's "postcode" field is relabeled
+    // "Makani Number" (a 10-digit UAE address code) — same input, new label.
     this.modalPostcode  = page.locator('.modal-content input[name="postcode"]');
 
-    // "Ship Here" button at the bottom of the new-address modal
-    this.saveAddressBtn = page.locator(
-      '.modal-footer button.action.primary, ' +
-      'button.action-save-address, ' +
-      'button:has-text("Ship Here")'
+    // "Ship Here" / save button inside the currently-open new-address modal.
+    // Scoped to .modal-popup._show so it never picks a "Ship Here" button
+    // on the background address cards (those share the same text but live
+    // outside the modal and would cause the click to intercept the modal overlay).
+    this.saveAddressBtn = page.locator('.modal-popup._show').locator(
+      'button.action.primary, button.action-save-address, button:has-text("Ship Here")'
     ).first();
 
     // ============================================================
@@ -112,28 +122,30 @@ class CheckoutPage extends BasePage {
     // summary sidebar. On some Magento themes it starts collapsed;
     // you click the heading to expand the input field.
 
+    // On this site the section heading reads "Apply Promo Code" and the
+    // Apply button's visible text is just "Apply" (not "Apply Discount") —
+    // selectors below are scoped to the real markup: <div class="discount-code">
+    // > <form id="discount-form"> > input#discount-code + button.action-apply.
     this.discountToggle = page.locator(
       '#block-discount-heading, ' +
       '.discount-code .title, ' +
-      'span:has-text("Apply Discount Code"), ' +
-      'button:has-text("Apply Discount Code")'
+      'span:has-text("Apply Promo Code"), ' +
+      'button:has-text("Apply Promo Code")'
     ).first();
 
     this.promoCodeInput = page.locator(
       '#discount-code, ' +
-      'input[name="coupon_code"]'
+      'input[name="discount_code"]'
     ).first();
 
     this.applyPromoBtn = page.locator(
-      '#discount-code-apply, ' +
-      'button[data-role="apply-discount"], ' +
-      'button:has-text("Apply Discount")'
+      '#discount-form button.action-apply, ' +
+      '.discount-code button.action-apply'
     ).first();
 
     this.cancelPromoBtn = page.locator(
-      '#discount-code-cancel, ' +
-      'button[data-role="cancel-discount"], ' +
-      'button:has-text("Cancel Coupon")'
+      '#discount-form button.action-cancel, ' +
+      '.discount-code button.action-cancel'
     ).first();
 
     // ============================================================
@@ -358,7 +370,21 @@ class CheckoutPage extends BasePage {
     if (data.lastName)  await this._fillField(this.modalLastName,  data.lastName);
     if (data.phone)     await this._fillField(this.modalPhone,     data.phone);
     if (data.street)    await this._fillField(this.modalStreet,    data.street);
-    if (data.city)      await this._fillField(this.modalCity,      data.city);
+
+    if (data.city) {
+      const hasCitySelect = await this.modalCitySelect.count().catch(() => 0);
+      if (hasCitySelect > 0) {
+        // City is a dropdown here — try the requested city by label, and if
+        // it isn't one of the offered options, just pick the first real
+        // option (index 0 is the "Please select a city" placeholder).
+        await this.modalCitySelect
+          .selectOption({ label: data.city })
+          .catch(() => this.modalCitySelect.selectOption({ index: 1 }).catch(() => {}));
+        console.log('CheckoutPage.fillNewAddressForm — city selected (dropdown):', data.city);
+      } else {
+        await this._fillField(this.modalCity, data.city);
+      }
+    }
 
     if (data.country) {
       await this.modalCountry.selectOption(data.country);
@@ -392,7 +418,12 @@ class CheckoutPage extends BasePage {
   // ----------------------------------------------------------
   async saveNewAddress() {
     await this.saveAddressBtn.waitFor({ state: 'visible', timeout: 8000 });
-    await this.saveAddressBtn.click();
+    await this.saveAddressBtn.scrollIntoViewIfNeeded().catch(() => {});
+    await this.page.waitForTimeout(300); // let scroll settle
+    await this.saveAddressBtn.click({ timeout: 15000 }).catch(async (e) => {
+      console.log('CheckoutPage.saveNewAddress — normal click blocked, retrying with force:', e.message.split('\n')[0]);
+      await this.saveAddressBtn.click({ force: true });
+    });
     // Wait for the modal overlay to fully disappear before any further clicks
     await this.page.locator('.modals-overlay').waitFor({ state: 'hidden', timeout: 15000 }).catch(() => {});
     await this.page.waitForTimeout(800);
@@ -515,7 +546,15 @@ class CheckoutPage extends BasePage {
       console.log('CheckoutPage.applyPromoCode — apply button not visible, skipping');
       return false;
     }
-    await this.applyPromoBtn.click();
+
+    // Clear any leftover modal overlay first, then fall back to a
+    // dispatched click if a leftover overlay still blocks a normal click
+    // (mirrors the retry pattern used in saveNewAddress()).
+    await this.page.locator('.modals-overlay').waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+    await this.applyPromoBtn.click({ timeout: 8000 }).catch(async () => {
+      console.log('CheckoutPage.applyPromoCode — normal click blocked, using dispatchEvent');
+      await this.applyPromoBtn.dispatchEvent('click');
+    });
 
     await this.page.waitForTimeout(3000); // wait for AJAX recalculation
 
@@ -716,23 +755,48 @@ class CheckoutPage extends BasePage {
   // Clicks "Update" to save the changes.
   // ----------------------------------------------------------
   async fillBillingAddressForm(data) {
-    const scope = this.page.locator(
-      '.payment-method._active .billing-address-form fieldset, ' +
-      '.billing-address-form fieldset, ' +
-      '.payment-method._active .billing-address-form, ' +
-      '.billing-address-form'
+    // The billing-address-form wrapper — try fieldset first, fall back to the
+    // wrapper itself (fieldset is not always present in custom themes).
+    const formWrapper = this.page.locator(
+      '.payment-method._active .billing-address-form, .billing-address-form'
     ).first();
 
-    // Bail out early if the billing form is not on the page
-    const scopeCount = await scope.count().catch(() => 0);
-    if (scopeCount === 0) {
+    const wrapperCount = await formWrapper.count().catch(() => 0);
+    if (wrapperCount === 0) {
       console.log('CheckoutPage.fillBillingAddressForm — billing form not found, skipping');
       return;
     }
 
-    const fill = async (name, value) => {
-      const el = scope.locator(`input[name="${name}"], select[name="${name}"]`).first();
-      // Use a 5 s timeout so a missing field doesn't block the whole form
+    // If Magento shows a "Select Billing Address" dropdown (saved address picker),
+    // select "New Address" so the editable fields appear.
+    const addrDropdown = formWrapper.locator(
+      'select[name*="billing_address_id"], select.select-billing-address'
+    ).first();
+    if (await addrDropdown.count() > 0) {
+      const opts = await addrDropdown.locator('option').all();
+      for (const opt of opts) {
+        const val = await opt.getAttribute('value').catch(() => '');
+        const txt = (await opt.textContent().catch(() => '')).toLowerCase();
+        if (val === '' || val === '0' || txt.includes('new')) {
+          await addrDropdown.selectOption(val).catch(() => {});
+          break;
+        }
+      }
+      await this.page.waitForTimeout(1000);
+    }
+
+    // Resolve final scope: prefer fieldset, fall back to wrapper
+    const fieldset = formWrapper.locator('fieldset').first();
+    const scope = (await fieldset.count().catch(() => 0)) > 0 ? fieldset : formWrapper;
+
+    // fill() uses name*= (contains) so it matches Magento's billing field
+    // naming convention: billingAddressngenius[firstname], etc.
+    // count() check prevents the 5 s-per-operation wait when a field is absent.
+    const fill = async (nameFragment, value) => {
+      const el = scope.locator(
+        `input[name*="${nameFragment}"], select[name*="${nameFragment}"]`
+      ).first();
+      if ((await el.count().catch(() => 0)) === 0) return;
       const tag = await el.evaluate(e => e.tagName, { timeout: 5000 }).catch(() => 'INPUT');
       if (tag === 'SELECT') {
         await el.selectOption(value, { timeout: 5000 }).catch(() => {});
@@ -745,17 +809,31 @@ class CheckoutPage extends BasePage {
     if (data.firstName) await fill('firstname',  data.firstName);
     if (data.lastName)  await fill('lastname',   data.lastName);
     if (data.phone)     await fill('telephone',  data.phone);
-    if (data.street)    await fill('street[0]',  data.street);
-    if (data.city)      await fill('city',       data.city);
+    if (data.street)    await fill('street',     data.street);
+
+    if (data.city) {
+      // City can be a custom dropdown (wrapper ends in ".city") or a plain input.
+      const citySelect = scope.locator(
+        'div[name$=".city"] select, select[name*="city"]'
+      ).first();
+      if ((await citySelect.count().catch(() => 0)) > 0) {
+        await citySelect
+          .selectOption({ label: data.city })
+          .catch(() => citySelect.selectOption({ index: 1 }).catch(() => {}));
+      } else {
+        await fill('city', data.city);
+      }
+    }
 
     if (data.country) {
       await fill('country_id', data.country);
-      await this.page.waitForTimeout(1500);
+      // Wait for the region dropdown to reload after the country changes
+      await this.page.waitForTimeout(2000);
     }
 
     if (data.region) {
-      const regSel = scope.locator('select[name="region_id"]').first();
-      if (await regSel.count() > 0) {
+      const regSel = scope.locator('select[name*="region_id"]').first();
+      if ((await regSel.count().catch(() => 0)) > 0) {
         await regSel
           .selectOption({ label: data.region })
           .catch(() => regSel.selectOption(data.region).catch(() => {}));
@@ -766,14 +844,24 @@ class CheckoutPage extends BasePage {
 
     if (data.postcode) await fill('postcode', data.postcode);
 
+    // Give Knockout a moment to re-evaluate bindings after all fields are filled
+    await this.page.waitForTimeout(1000);
+
     // Click "Update" to save
     const updateBtn = this.page.locator(
-      '.payment-method._active button.action.action-update, ' +
-      'button.action.action-update'
+      '.payment-method._active button.action.action-update, button.action.action-update'
     ).first();
-    if (await updateBtn.count() > 0) {
-      await updateBtn.click();
+
+    if ((await updateBtn.count().catch(() => 0)) > 0) {
+      await updateBtn.scrollIntoViewIfNeeded().catch(() => {});
+      await this.page.waitForTimeout(500);
+      await updateBtn.click({ timeout: 15000 }).catch(async (e) => {
+        console.log('CheckoutPage.fillBillingAddressForm — update blocked, forcing:', e.message.split('\n')[0]);
+        await updateBtn.click({ force: true });
+      });
       await this.page.waitForTimeout(2000);
+    } else {
+      console.log('CheckoutPage.fillBillingAddressForm — no Update button found, form may auto-save');
     }
 
     console.log('CheckoutPage.fillBillingAddressForm — billing address saved');

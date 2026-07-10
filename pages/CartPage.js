@@ -534,28 +534,36 @@ class CartPage extends BasePage {
   async removeItemAtIndex(index = 0) {
     const removeBtn = this.itemRemoveLinks.nth(index);
 
-    // HAL UAE's delete buttons exist in the DOM but are CSS-hidden (no bounding box).
-    // Using evaluate() fires a native JS click that bypasses Playwright visibility checks.
+    // Wait for the widget to be attached AND for Magento's RequireJS to finish
+    // binding the delete handler. networkidle means all JS modules have loaded.
     await removeBtn.waitFor({ state: 'attached', timeout: 10000 });
-    await removeBtn.evaluate(el => el.click());
+    await this.page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+
+    // force:true bypasses the CSS visibility check (Magento hides delete buttons
+    // until hover). We no longer use evaluate() because it fires before the
+    // Magento widget binds, making the click do nothing.
+    await removeBtn.click({ force: true });
 
     // HAL UAE shows a confirmation dialog: "Are you sure you want to remove this item?"
-    // We must click the OK/confirm button, otherwise the item is NOT deleted.
+    // We must click OK and wait for the resulting page navigation together so
+    // Playwright doesn't time out while the page reloads.
     const confirmOk = this.page.locator(
       '.modal-popup button.action-primary, ' +
       'button:has-text("OK"), ' +
       '.modal-footer button.action-accept'
     );
     try {
-      await confirmOk.waitFor({ state: 'visible', timeout: 5000 });
-      await confirmOk.click();
+      await confirmOk.waitFor({ state: 'visible', timeout: 8000 });
+      await Promise.all([
+        this.page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {}),
+        confirmOk.click(),
+      ]);
     } catch {
-      // No confirmation dialog — some themes skip it; proceed to page load
+      // No confirmation dialog — direct POST; wait for the resulting reload
+      await this.page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
     }
 
-    // Wait for the page to reload / AJAX to update after item removal
-    await this.waitForPageLoad();
-    await this.page.waitForTimeout(1500);
+    await this.page.waitForTimeout(1000);
   }
 
   // ----------------------------------------------------------

@@ -280,8 +280,8 @@ class MailinatorPage {
 
     // Find the Auth0 OTP email specifically — don't just click the newest row,
     // because unrelated emails may have arrived after we started watching.
-    const otpRow   = await this._findOTPRow();
-    const targetRow = otpRow || this.firstEmailRow; // fallback keeps old behaviour
+    const otpRow    = await this._findOTPRow();
+    const targetRow = otpRow || this.firstEmailRow;
 
     try {
       await targetRow.waitFor({ state: 'visible', timeout: 8000 });
@@ -293,27 +293,133 @@ class MailinatorPage {
     const rowText = await targetRow.textContent().catch(() => '');
     console.log('MailinatorPage.getOTPFromLatestEmail — row text:', rowText.trim().substring(0, 120));
 
-    // Click the subject link (<a>) inside the row — more reliable than clicking
-    // the <tr> itself because Angular listens on the anchor, not the row.
-    console.log('MailinatorPage.getOTPFromLatestEmail — clicking email subject link');
+    // ── Strategy 1: Mailinator public API ───────────────────────
+    // The Mailinator web UI detects automated browsers and shows
+    // "Account blocked" instead of the email content.  The JSON API
+    // bypasses that entirely — it returns the raw message body and
+    // needs no authentication for public mailinator.com inboxes.
+    //
+    // Row IDs are: "row_<inbox>-<msgId>" or "<inbox>-<timestamp>-<msgId>"
+    // We try to extract the message ID from the DOM row, then call:
+    //   GET /api/v2/domains/mailinator.com/inboxes/<inbox>/messages/<msgId>
+    const rowId = await targetRow.getAttribute('id').catch(() => null);
+    console.log('MailinatorPage.getOTPFromLatestEmail — row id:', rowId);
+
+    if (rowId) {
+      // Row ID format: "row_<inbox>-<timestamp>-<msgId>"
+      // The message ID is the last '-' separated segment.
+      const msgId = rowId.split('-').pop();
+      console.log('MailinatorPage.getOTPFromLatestEmail — extracted msgId:', msgId);
+
+      // ── Strategy 1a: Mailinator API with token ───────────────────
+      // A free Mailinator account provides an API token that allows reading
+      // public inbox messages.  Store it in .env as MAILINATOR_TOKEN.
+      // Get yours at: https://www.mailinator.com → Account → API Token
+      const apiToken = process.env.MAILINATOR_TOKEN;
+      if (apiToken) {
+        try {
+          const apiUrl =
+            `https://www.mailinator.com/api/v2/domains/mailinator.com` +
+            `/inboxes/${encodeURIComponent(this.inboxName)}/messages/${encodeURIComponent(msgId)}`;
+          const resp = await this.page.request.get(apiUrl, {
+            headers: { 'Authorization': apiToken },
+            timeout: 10000,
+          });
+
+          if (resp.ok()) {
+            const data = await resp.json();
+            const parts = data?.data?.parts || [];
+            for (const part of parts) {
+              const body = part?.body || '';
+              const m = body.match(/\b(\d{6})\b/);
+              if (m) {
+                console.log('MailinatorPage.getOTPFromLatestEmail — OTP from API:', m[1]);
+                return m[1];
+              }
+            }
+            const subject = data?.data?.subject || '';
+            const sm = subject.match(/\b(\d{6})\b/);
+            if (sm) {
+              console.log('MailinatorPage.getOTPFromLatestEmail — OTP from subject:', sm[1]);
+              return sm[1];
+            }
+            console.log('MailinatorPage.getOTPFromLatestEmail — API ok but no OTP found');
+          } else {
+            console.log('MailinatorPage.getOTPFromLatestEmail — API returned', resp.status());
+          }
+        } catch (e) {
+          console.log('MailinatorPage.getOTPFromLatestEmail — API error:', e.message.split('\n')[0]);
+        }
+      } else {
+        console.log('MailinatorPage.getOTPFromLatestEmail — MAILINATOR_TOKEN not set, skipping API');
+      }
+
+      // ── Strategy 1b: Navigate directly to the message URL ───────
+      // Navigating to the URL with the msgid query param avoids the
+      // click-triggered "Account blocked" restriction.
+      try {
+        const directUrl =
+          `https://www.mailinator.com/v4/public/inboxes.jsp` +
+          `?to=${encodeURIComponent(this.inboxName)}&msgid=${encodeURIComponent(msgId)}`;
+        console.log('MailinatorPage.getOTPFromLatestEmail — navigating to direct message URL:', directUrl);
+        await this.page.goto(directUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        await this.page.waitForTimeout(3000);
+
+        // Try to read the iframe at this URL
+        const iframe = this.page.locator('iframe#html_msg_body');
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            await iframe.waitFor({ state: 'attached', timeout: 6000 });
+            const frame = iframe.contentFrame();
+            const text  = await frame.locator('body').innerText({ timeout: 5000 });
+            if (text && /\d{4,}/.test(text)) {
+              const m = text.match(/\b(\d{6})\b/);
+              if (m) {
+                console.log('MailinatorPage.getOTPFromLatestEmail — OTP from direct URL iframe:', m[1]);
+                return m[1];
+              }
+            }
+          } catch { /* ignore, try next */ }
+          if (attempt < 3) await this.page.waitForTimeout(2000).catch(() => {});
+        }
+
+        // Also try reading from the page body (excluding nav items)
+        const pageText = await this.page.evaluate(() => {
+          const main = document.querySelector('#msgpane, .msg-body, [class*="message"], main');
+          return main ? main.innerText : '';
+        }).catch(() => '');
+        if (pageText && /\d{4,}/.test(pageText)) {
+          const m = pageText.match(/\b(\d{6})\b/);
+          if (m) {
+            console.log('MailinatorPage.getOTPFromLatestEmail — OTP from direct URL page:', m[1]);
+            return m[1];
+          }
+        }
+        console.log('MailinatorPage.getOTPFromLatestEmail — direct URL gave no OTP');
+
+        // Navigate back to inbox for the iframe fallback below
+        await this.page.goto(this.inboxUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        await this.page.waitForTimeout(2000);
+      } catch (e) {
+        console.log('MailinatorPage.getOTPFromLatestEmail — direct URL error:', e.message.split('\n')[0]);
+      }
+    }
+
+    // ── Strategy 2: Read from the email body iframe ──────────────
+    // Click the email row to open the message panel, then read the iframe.
+    console.log('MailinatorPage.getOTPFromLatestEmail — falling back to iframe approach');
     const subjectLink = targetRow.locator('td a').first();
     const hasLink = await subjectLink.count().catch(() => 0);
     if (hasLink > 0) {
       await subjectLink.click().catch(() => {});
     } else {
-      // Fallback: click the row directly if no <a> found
       await this.firstEmailRow.click().catch(() => {});
     }
 
-    // Give the Angular viewer and iframe initial time to start loading
     await this.page.waitForTimeout(3000).catch(() => {});
 
     let bodyText = '';
 
-    // ── Strategy 1: Read from the email body iframe ──────────────
-    // Mailinator renders the email inside an iframe with id="html_msg_body".
-    // The iframe may take a few seconds to load its content — so we
-    // retry up to 4 times (every 3 s) before giving up.
     const iframeLocator = this.page.locator('iframe#html_msg_body');
     for (let attempt = 1; attempt <= 4; attempt++) {
       try {
@@ -321,7 +427,6 @@ class MailinatorPage {
         const frameLocator = iframeLocator.contentFrame();
         const text = await frameLocator.locator('body').innerText({ timeout: 6000 });
 
-        // Accept only if the text actually contains digits (i.e. the email body loaded)
         if (text && /\d{4,}/.test(text)) {
           bodyText = text;
           console.log(`MailinatorPage.getOTPFromLatestEmail — iframe read OK (attempt ${attempt}), preview:`,
@@ -338,7 +443,7 @@ class MailinatorPage {
       if (attempt < 4) await this.page.waitForTimeout(3000).catch(() => {});
     }
 
-    // ── Strategy 2: Fallback — read from the full page body ──────
+    // ── Strategy 3: page body text ───────────────────────────────
     if (!bodyText) {
       console.log('MailinatorPage.getOTPFromLatestEmail — iframe gave no digits, falling back to page text');
       bodyText = await this.page.evaluate(
@@ -350,14 +455,12 @@ class MailinatorPage {
     }
 
     // ── Extract the 6-digit OTP ───────────────────────────────────
-    // Primary: standalone 6-digit number
     const match = bodyText.match(/\b(\d{6})\b/);
     if (match) {
       console.log('MailinatorPage.getOTPFromLatestEmail — OTP:', match[1]);
       return match[1];
     }
 
-    // Fallback: digit sequence after a keyword
     const labeled = bodyText.match(/(?:code|otp|verification|pin)[^\d]*?(\d{4,8})/i);
     if (labeled) {
       console.log('MailinatorPage.getOTPFromLatestEmail — OTP (labeled):', labeled[1]);

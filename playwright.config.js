@@ -4,6 +4,10 @@
 // Playwright reads this file automatically when you run tests.
 // ============================================================
 
+// Load credentials from .env file (GMAIL_PASSWORD, MOCK_OTP, etc.)
+// .env is gitignored — never committed to the repo.
+require('dotenv').config();
+
 // Import the defineConfig helper from Playwright.
 // This gives us autocomplete and validation for our settings.
 const { defineConfig, devices } = require('@playwright/test');

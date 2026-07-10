@@ -82,6 +82,11 @@ const { CheckoutPage } = require('../pages/CheckoutPage');
 // Delete this file (or set FORCE_LOGIN=true) to force a fresh OTP login.
 const AUTH_STATE_FILE = path.join(__dirname, '..', 'auth-state.json');
 
+// Saves the Auth0 OTP challenge URL between runs so MOCK_OTP works correctly.
+// When MOCK_OTP is set, the first run saves this URL instead of sending a new OTP
+// on re-run — so the code you supply actually matches the live Auth0 session.
+const OTP_URL_FILE = path.join(__dirname, '..', 'otp-url.txt');
+
 // ============================================================
 // TEST DATA — edit these constants to match your environment
 // ============================================================
@@ -90,10 +95,14 @@ const TEST_DATA = {
   email   : 'kp.abhinand.seller@mailinator.com',
   mockOtp : process.env.MOCK_OTP || null,
 
-  // Promo code to apply at checkout (update to a valid code)
-  promoCode : process.env.PROMO_CODE || 'TESTPROMO',
+  // Promo codes (CH05 / CH12)
+  invalidPromoCode : 'TESTPROMO', // deliberately invalid — used to test error handling
+  promoCode        : process.env.PROMO_CODE || 'HAL10', // valid discount code
 
   // New shipping address to create (step CH03)
+  // NOTE: "postcode" is rendered on this site as "Makani Number" — a UAE
+  // address code that must be exactly 10 digits. "city" is a dropdown, so
+  // it must exactly match one of the options offered (e.g. 'Dubai').
   newShippingAddress: {
     firstName : 'Test',
     lastName  : 'Automation',
@@ -102,28 +111,16 @@ const TEST_DATA = {
     city      : 'Dubai',
     country   : 'AE',    // ISO 2-letter code for United Arab Emirates
     region    : 'Dubai', // Emirate name (shown in the state/region dropdown)
-    postcode  : '00000',
-  },
-
-  // New billing address to set on the payment step (step CH10)
-  newBillingAddress: {
-    firstName : 'Billing',
-    lastName  : 'Test',
-    phone     : '509876543',   // UAE format: 9 digits, no leading 0
-    street    : '456 Billing Avenue, Business Bay',
-    city      : 'Dubai',
-    country   : 'AE',
-    region    : 'Dubai',
-    postcode  : '00000',
+    postcode  : '1234567890', // Makani Number — must be 10 digits
   },
 
   // N-Genius test card details (step CH14)
   card: {
-    number      : '4111 1111 1111 1111', // Visa test card
-    expiryMonth : '03',
-    expiryYear  : '2031',
-    cvv         : '156',
-    name        : 'test',
+    number      : '2303779999000275',
+    expiryMonth : '12',
+    expiryYear  : '28',   // 2-digit year as entered on the payment form
+    cvv         : '100',
+    name        : 'Test',
   },
 
   // 3D-Secure one-time passcode (step CH15)
@@ -160,7 +157,7 @@ test.describe('Checkout — Full E2E Flow', () => {
     const contextOpts   = stateExists ? { storageState: AUTH_STATE_FILE } : {};
     const browserContext = await browser.newContext(contextOpts);
     page     = await browserContext.newPage();
-    auth     = new AuthPage(page);
+    auth      = new AuthPage(page);
     mailinator = new MailinatorPage(page);
     plp      = new PLPPage(page);
     pdp      = new PDPPage(page);
@@ -186,6 +183,9 @@ test.describe('Checkout — Full E2E Flow', () => {
       if (!landedUrl.includes('/login') && landedUrl.includes('mcstaging2.hal-uae.com')) {
         loggedIn = true;
         console.log('Setup: saved session valid — redirected to:', landedUrl);
+        // Re-save cookies now — Magento may have issued new session cookies
+        // since the file was written; refreshing prevents "rolling session" stale-cookie failures.
+        await browserContext.storageState({ path: AUTH_STATE_FILE });
       } else {
         loggedIn = await auth.isLoggedIn();
         console.log('Setup: saved session valid =', loggedIn);
@@ -193,9 +193,44 @@ test.describe('Checkout — Full E2E Flow', () => {
     }
 
     if (!loggedIn) {
-      // ── STEP 2A: Trigger Auth0 OTP ────────────────────────────
-      await auth.navigateToLogin();
-      await auth.enterEmailAndSubmit(TEST_DATA.email);
+      // ── STEP 2A: Trigger Auth0 OTP (or reuse saved URL) ───────
+      // Problem: every call to enterEmailAndSubmit sends a new OTP email,
+      // which invalidates any previous code. So MOCK_OTP must match the
+      // code sent in THE SAME run — which is impossible to pre-set.
+      //
+      // Solution: when MOCK_OTP is set, save the Auth0 challenge URL to a
+      // file after the first send. On the next run (within 8 min), load the
+      // saved URL and SKIP sending a new OTP so the code still matches.
+      const hasSavedUrl = fs.existsSync(OTP_URL_FILE);
+      const urlAge      = hasSavedUrl
+        ? Date.now() - fs.statSync(OTP_URL_FILE).mtimeMs
+        : Infinity;
+      const reuseUrl    = TEST_DATA.mockOtp && hasSavedUrl && urlAge < 8 * 60 * 1000;
+
+      if (reuseUrl) {
+        // Load the saved challenge URL — no new OTP email is sent
+        auth.otpPageUrl = fs.readFileSync(OTP_URL_FILE, 'utf8').trim();
+        fs.unlinkSync(OTP_URL_FILE); // consume it — one-time use
+        console.log('Setup: reusing saved OTP challenge URL (age', Math.round(urlAge / 1000), 's)');
+      } else {
+        if (!TEST_DATA.mockOtp) {
+          // Open Mailinator inbox BEFORE triggering Auth0 so openInbox()
+          // snapshots the current email count as a baseline.
+          // waitForOTPEmail() then waits for a NEW email above that count.
+          console.log('Setup: opening Mailinator inbox before triggering Auth0 OTP...');
+          await mailinator.openInbox(TEST_DATA.email);
+        }
+
+        // Trigger Auth0 OTP (sends email to Mailinator inbox)
+        await auth.navigateToLogin();
+        await auth.enterEmailAndSubmit(TEST_DATA.email);
+
+        if (TEST_DATA.mockOtp) {
+          // Save URL so the NEXT run can use MOCK_OTP correctly
+          fs.writeFileSync(OTP_URL_FILE, auth.otpPageUrl, 'utf8');
+          console.log('Setup: OTP URL saved — check Mailinator for the NEW code, then re-run with MOCK_OTP.');
+        }
+      }
 
       // ── STEP 2B: Get the OTP ──────────────────────────────────
       let otp;
@@ -205,12 +240,8 @@ test.describe('Checkout — Full E2E Flow', () => {
         console.log('Setup: using MOCK_OTP →', otp);
 
       } else {
-        await mailinator.openInbox(TEST_DATA.email);
-
-        const arrived = await mailinator.waitForOTPEmail(
-          300000,
-          () => auth.resendOTP()
-        );
+        // Poll Mailinator for the OTP email (no login needed — public inbox).
+        const arrived = await mailinator.waitForOTPEmail(300000);
 
         if (!arrived) {
           throw new Error(
@@ -457,11 +488,20 @@ test.describe('Checkout — Full E2E Flow', () => {
   // ----------------------------------------------------------
   test('CH05 — apply promo code (shipping step)', async () => {
     console.log('\n── CH05: Apply Promo Code (Shipping Step) ──');
-    console.log('CH05: using code =', TEST_DATA.promoCode);
 
-    // NOTE: If TEST_DATA.promoCode is not a valid code on this
-    // store, the apply will fail silently — the test still passes
-    // because promo codes are optional.
+    // Step 1: Try an invalid promo code first to verify error handling
+    console.log('CH05: trying invalid code =', TEST_DATA.invalidPromoCode);
+    const invalidApplied = await checkout.applyPromoCode(TEST_DATA.invalidPromoCode);
+    if (invalidApplied) {
+      console.log('CH05: unexpected — invalid code was accepted; cancelling it...');
+      await checkout.cancelPromoBtn.click().catch(() => {});
+      await page.waitForTimeout(1000);
+    } else {
+      console.log('CH05: invalid code correctly rejected ✓');
+    }
+
+    // Step 2: Apply the valid promo code HAL10
+    console.log('CH05: applying valid code =', TEST_DATA.promoCode);
     const applied = await checkout.applyPromoCode(TEST_DATA.promoCode);
 
     if (applied) {
@@ -469,8 +509,8 @@ test.describe('Checkout — Full E2E Flow', () => {
       console.log('CH05: discount applied =', discount.trim());
       console.log('CH05: PASS — promo code applied ✓');
     } else {
-      console.log('CH05: promo code not applied (may be invalid for this store — that is OK)');
-      console.log('CH05: PASS — step completed (promo optional) ✓');
+      console.log('CH05: valid code not applied (may not be active on staging — that is OK)');
+      console.log('CH05: PASS — step completed ✓');
     }
   });
 
@@ -578,19 +618,103 @@ test.describe('Checkout — Full E2E Flow', () => {
   // ----------------------------------------------------------
   // TEST CH10 — Change Billing Address
   // ----------------------------------------------------------
+  // Flow:
+  //   1. Uncheck "My billing and shipping address are the same" if checked
+  //   2. Open the billing address dropdown (shows saved addresses)
+  //   3. Select the first saved address from the dropdown
+  //   4. Click the Update button to confirm
+  // ----------------------------------------------------------
   test('CH10 — change billing address', async () => {
     console.log('\n── CH10: Change Billing Address ──');
 
-    // Open the billing address form (uncheck "same as shipping" if needed)
-    await checkout.openBillingAddressForm();
+    // Step 1: Uncheck "billing same as shipping" if it is currently checked.
+    // When unchecked, Magento shows the billing address section with a
+    // saved-address dropdown.
+    const sameChecked = await checkout.isBillingSameAsShipping();
+    console.log('CH10: billing same as shipping =', sameChecked);
 
-    // Fill in the new billing address
-    await checkout.fillBillingAddressForm(TEST_DATA.newBillingAddress);
+    if (sameChecked === true) {
+      await checkout.billingSameCheckbox.uncheck();
+      await page.waitForTimeout(1500);
+      console.log('CH10: unchecked same-as-shipping ✓');
+    }
 
-    // Read back the updated address for logging
+    // Step 2: Look for a saved-address dropdown in the billing section.
+    // Magento renders one when the user has saved addresses on file.
+    const billingDropdown = page.locator(
+      '.payment-method._active select[name*="billing_address_id"], ' +
+      '.billing-address-form select[name*="billing_address_id"], ' +
+      '.payment-method._active .billing-address-form select, ' +
+      '.billing-address-form select'
+    ).first();
+
+    const hasDropdown = (await billingDropdown.count().catch(() => 0)) > 0;
+    console.log('CH10: billing address dropdown found =', hasDropdown);
+
+    if (hasDropdown) {
+      // Log every option so we can see what addresses are available
+      const opts = await billingDropdown.locator('option').all();
+      console.log('CH10: dropdown has', opts.length, 'options');
+      for (const opt of opts) {
+        const val = await opt.getAttribute('value').catch(() => '');
+        const txt = (await opt.textContent().catch(() => '')).trim();
+        console.log(`CH10:   option value="${val}" → "${txt}"`);
+      }
+
+      // Pick the first option that looks like a saved address (has a numeric id)
+      let picked = false;
+      for (const opt of opts) {
+        const val = await opt.getAttribute('value').catch(() => '');
+        if (val && val !== '' && val !== '0' && !isNaN(val)) {
+          await billingDropdown.selectOption(val);
+          const txt = (await opt.textContent().catch(() => '')).trim();
+          console.log('CH10: selected billing address →', txt);
+          picked = true;
+          break;
+        }
+      }
+      if (!picked) {
+        // Fallback: just pick whichever option is at index 0
+        await billingDropdown.selectOption({ index: 0 }).catch(() => {});
+        console.log('CH10: picked first option as fallback');
+      }
+      await page.waitForTimeout(1000);
+
+    } else {
+      // No dropdown — address may already be shown with an "Edit" link.
+      // Click it to open the address section.
+      const editBtn = page.locator(
+        '.payment-method._active .billing-address-details a.action, ' +
+        '.payment-method._active button.action-edit-address'
+      ).first();
+      if ((await editBtn.count().catch(() => 0)) > 0) {
+        await editBtn.click().catch(() => {});
+        await page.waitForTimeout(1000);
+        console.log('CH10: opened billing address edit section');
+      }
+    }
+
+    // Step 3: Click the "Update" button to confirm the selected address.
+    const updateBtn = page.locator(
+      '.payment-method._active button.action.action-update, button.action.action-update'
+    ).first();
+
+    if ((await updateBtn.count().catch(() => 0)) > 0) {
+      await updateBtn.scrollIntoViewIfNeeded().catch(() => {});
+      await page.waitForTimeout(500);
+      await updateBtn.click({ timeout: 10000 }).catch(async () => {
+        await updateBtn.click({ force: true }).catch(() => {});
+      });
+      await page.waitForTimeout(2000);
+      console.log('CH10: Update button clicked ✓');
+    } else {
+      console.log('CH10: no Update button — address may auto-save');
+    }
+
+    // Log the final billing address text
     const updatedText = await checkout.getBillingAddressText();
-    console.log('CH10: updated billing address →',
-      updatedText.substring(0, 150) || '(form may still be open)');
+    console.log('CH10: billing address →',
+      updatedText.substring(0, 150) || '(section hidden)');
 
     console.log('CH10: PASS — billing address updated ✓');
   });
@@ -803,8 +927,12 @@ test.describe('Checkout — Full E2E Flow', () => {
     // ── End diagnostics ──────────────────────────────────────────
 
     // ── Strategy A: direct visible inputs (no iframe) ────────────
-    // N-Genius sandbox sometimes renders plain inputs when using test mode.
+    // N-Genius sandbox renders plain inputs in test mode.
+    // The N-Genius IDs are ALL-UPPERCASE: CARD_NUMBER, EXPIRY_MONTH, EXPIRY_YEAR, CVV, CARD_HOLDER_NAME.
+    // CSS attribute selectors are case-sensitive — so "id*='card-number'" misses "CARD_NUMBER".
+    // We check for the exact N-Genius IDs first, then lowercase fallbacks.
     const directCardInput = page.locator(
+      'input[id="CARD_NUMBER"], input[id="card_number"], ' +
       'input[id*="card-number"], input[id*="pan"], ' +
       'input[placeholder*="Card number"], input[placeholder*="Card Number"], ' +
       'input[placeholder*="1234"], input[aria-label*="card"], input[aria-label*="Card"]'
@@ -817,27 +945,51 @@ test.describe('Checkout — Full E2E Flow', () => {
 
       await directCardInput.fill(number);
 
-      const expiryInput = page.locator(
-        'input[id*="expiry"], input[placeholder*="MM"], input[placeholder*="Expiry"]'
+      // N-Genius uses separate EXPIRY_MONTH and EXPIRY_YEAR inputs (not a combined MM/YY field).
+      // Try separate month/year inputs first; fall back to a combined expiry input.
+      const monthInput = page.locator(
+        'input[id="EXPIRY_MONTH"], input[id="expiry_month"], ' +
+        'input[id*="MONTH"], input[id*="month"], select[id*="month"]'
       ).first();
-      const expiryVisible = await expiryInput.isVisible().catch(() => false);
+      const monthVisible = await monthInput.isVisible().catch(() => false);
 
-      if (expiryVisible) {
-        await expiryInput.fill(`${expiryMonth}/${expiryYear.slice(-2)}`);
+      if (monthVisible) {
+        await monthInput.fill(expiryMonth).catch(() => monthInput.selectOption(expiryMonth).catch(() => {}));
+        const yearInput = page.locator(
+          'input[id="EXPIRY_YEAR"], input[id="expiry_year"], ' +
+          'input[id*="YEAR"], input[id*="year"], select[id*="year"]'
+        ).first();
+        // Try 2-digit year first; if the field is a SELECT with 4-digit options,
+        // fall back to '20' + year (e.g. '28' → '2028')
+        await yearInput.fill(expiryYear)
+          .catch(() => yearInput.selectOption(expiryYear)
+          .catch(() => yearInput.selectOption('20' + expiryYear)
+          .catch(() => {})));
+        console.log('CH14: expiry (month + year) entered ✓');
       } else {
-        await page.locator('input[id*="month"], select[id*="month"]').first().fill(expiryMonth).catch(() => {});
-        await page.locator('input[id*="year"],  select[id*="year"]').first().fill(expiryYear).catch(() => {});
+        const expiryInput = page.locator(
+          'input[id*="expiry"], input[placeholder*="MM"], input[placeholder*="Expiry"]'
+        ).first();
+        const expiryVisible = await expiryInput.isVisible().catch(() => false);
+        if (expiryVisible) {
+          await expiryInput.fill(`${expiryMonth}/${expiryYear.slice(-2)}`);
+          console.log('CH14: expiry (combined) entered ✓');
+        }
       }
 
       await page.locator(
+        'input[id="CVV"], input[id="cvv"], ' +
         'input[id*="cvv"], input[id*="cvc"], input[placeholder*="CVV"], ' +
         'input[placeholder*="Security Code"], input[placeholder*="security"]'
       ).first().fill(cvv).catch(() => {});
+      console.log('CH14: CVV entered ✓');
 
       await page.locator(
+        'input[id="CARD_HOLDER_NAME"], input[id="card_holder_name"], ' +
         'input[id*="name"], input[name*="name"], input[placeholder*="Name"], ' +
         'input[placeholder*="Cardholder"], input[placeholder*="name on card"]'
       ).first().fill(name).catch(() => {});
+      console.log('CH14: card holder name entered ✓');
 
     } else {
       // ── Strategy B: iframe-based hosted fields ──────────────────
@@ -846,7 +998,9 @@ test.describe('Checkout — Full E2E Flow', () => {
       // Fallback selectors: id/name containing field keywords.
       console.log('CH14: card form uses iframes — using frameLocator');
 
-      // Helper: fill the first <input> or <select> inside a frameLocator
+      // Helper: fill the first <input> or <select> inside a frameLocator.
+      // For SELECT elements, tries the value as-is first; if that fails it
+      // prepends '20' (so '28' becomes '2028') to handle 4-digit year dropdowns.
       const fillFrame = async (frameSel, value, label) => {
         const frame = page.frameLocator(frameSel).first();
         try {
@@ -854,7 +1008,8 @@ test.describe('Checkout — Full E2E Flow', () => {
           await el.waitFor({ state: 'visible', timeout: 10000 });
           const tag = await el.evaluate(e => e.tagName).catch(() => 'INPUT');
           if (tag === 'SELECT') {
-            await el.selectOption(value);
+            await el.selectOption(value)
+              .catch(() => el.selectOption('20' + value).catch(() => {}));
           } else {
             await el.fill(String(value));
           }
@@ -992,38 +1147,34 @@ test.describe('Checkout — Full E2E Flow', () => {
     console.log('CH15: 3DS passcode to enter =', passcode);
 
     // ── Wait for 3DS challenge UI ────────────────────────────────
-    // The 3DS page may be:
-    //   A) Embedded in an iframe inside the N-Genius page
-    //   B) A full-page redirect to the card issuer's ACS server
+    // The N-Genius sandbox's "fake 3ds2 challenge" page can render either
+    // as the top-level page or inside an iframe with a random id/name —
+    // it has no attribute we can select on. So instead of guessing which
+    // frame it's in, scan every frame's text for "passcode" (the label
+    // shown on the challenge page) and use whichever frame matches.
     await page.waitForTimeout(3000);
 
     let enteredPasscode = false;
+    let challengeFrame = null;
 
-    // ── Try: iframe-based 3DS challenge ─────────────────────────
-    const tdsIframeLocator = page.locator(
-      'iframe[id*="3ds"], iframe[name*="3ds"], ' +
-      'iframe[src*="3ds"], iframe[src*="acs"], ' +
-      'iframe[src*="authentication"], iframe[id*="challenge"]'
-    ).first();
+    for (const frame of page.frames()) {
+      const text = await frame.locator('body').innerText({ timeout: 2000 }).catch(() => '');
+      if (/passcode/i.test(text)) {
+        challengeFrame = frame;
+        break;
+      }
+    }
 
-    const hasTdsIframe = await tdsIframeLocator.isVisible().catch(() => false);
-
-    if (hasTdsIframe) {
-      console.log('CH15: 3DS iframe detected — filling inside iframe');
-      const tdsFrame = tdsIframeLocator.contentFrame();
+    if (challengeFrame) {
+      console.log('CH15: 3DS challenge frame found — filling passcode');
 
       try {
-        const passInput = tdsFrame.locator(
-          'input[type="password"], input[name*="otp"], ' +
-          'input[name*="code"], input[name*="password"], ' +
-          'input[id*="otp"], input[placeholder*="passcode"]'
-        ).first();
-
-        await passInput.waitFor({ state: 'visible', timeout: 20000 });
+        const passInput = challengeFrame.locator('input').first();
+        await passInput.waitFor({ state: 'visible', timeout: 10000 });
         await passInput.fill(passcode);
-        console.log('CH15: passcode entered inside iframe ✓');
+        console.log('CH15: passcode entered ✓');
 
-        const submitBtn = tdsFrame.locator(
+        const submitBtn = challengeFrame.locator(
           'button[type="submit"], input[type="submit"], ' +
           'button:has-text("Submit"), button:has-text("Verify")'
         ).first();
@@ -1031,42 +1182,10 @@ test.describe('Checkout — Full E2E Flow', () => {
         enteredPasscode = true;
 
       } catch (e) {
-        console.log('CH15: iframe 3DS input not found —', e.message.split('\n')[0]);
+        console.log('CH15: could not fill passcode in challenge frame —', e.message.split('\n')[0]);
       }
-    }
-
-    // ── Try: full-page 3DS redirect ─────────────────────────────
-    if (!enteredPasscode) {
-      console.log('CH15: no iframe — trying full-page 3DS form');
-
-      const passInput = page.locator(
-        'input[type="password"], input[name*="otp"], ' +
-        'input[name*="code"], input[name*="password"], ' +
-        'input[id*="otp"], input[placeholder*="passcode"], ' +
-        'input[placeholder*="Passcode"]'
-      ).first();
-
-      try {
-        await passInput.waitFor({ state: 'visible', timeout: 20000 });
-        await passInput.fill(passcode);
-        console.log('CH15: passcode entered on full page ✓');
-
-        const submitBtn = page.locator(
-          'button[type="submit"], input[type="submit"], ' +
-          'button:has-text("Submit"), button:has-text("Verify"), ' +
-          'button:has-text("Authenticate")'
-        ).first();
-        await submitBtn.waitFor({ state: 'visible', timeout: 5000 });
-        await submitBtn.click();
-        enteredPasscode = true;
-
-      } catch (e) {
-        console.log('CH15: 3DS form not found —', e.message.split('\n')[0]);
-      }
-    }
-
-    if (!enteredPasscode) {
-      console.log('CH15 WARN: could not locate 3DS passcode input — may have auto-completed');
+    } else {
+      console.log('CH15 WARN: no frame with "passcode" text found — may have auto-completed');
     }
 
     // ── Wait for redirect back to Magento success page ───────────

@@ -9,7 +9,8 @@
     "report": "npx playwright show-report"
   },
   "devDependencies": {
-    "@playwright/test": "^1.49.0"
+    "@playwright/test": "^1.49.0",
+    "dotenv": "^17.4.2"
   },
   "dependencies": {
     "vibium": "^26.5.31"

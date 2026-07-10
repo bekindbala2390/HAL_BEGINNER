@@ -1131,10 +1131,17 @@ class PDPPage extends BasePage {
   async clickShareButton() {
     try {
       await this.shareButton.waitFor({ state: 'visible', timeout: 5000 });
-      await this.shareButton.click();
 
-      // Wait briefly for any popup/modal to animate into view
-      await this.page.waitForTimeout(1000);
+      // Click and simultaneously wait for any navigation the link may trigger.
+      // Firefox needs this explicit navigation wait; Chromium resolves it
+      // quickly while Firefox may take longer or not navigate at all.
+      await Promise.all([
+        this.page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 3000 }).catch(() => {}),
+        this.shareButton.click(),
+      ]);
+
+      // Additional short wait for popup animation if no navigation happened
+      await this.page.waitForTimeout(500);
       return true;
     } catch {
       console.log('Share button not found in .product-social-links');
@@ -1230,8 +1237,11 @@ class PDPPage extends BasePage {
     console.log('PDPPage.clickAddToWishlist — clicking wishlist link');
     await this.wishlistButton.click();
 
-    // Wait for Magento to process the request and start the redirect
-    await this.page.waitForLoadState('domcontentloaded');
+    // Wait for Magento to redirect to the wishlist page.
+    // Firefox is slower to complete this navigation than Chromium, so we
+    // wait for the URL to actually contain "wishlist" rather than just
+    // waiting for domcontentloaded (which can fire before the redirect).
+    await this.page.waitForURL(/wishlist/, { timeout: 15000, waitUntil: 'domcontentloaded' });
   }
 
   // ----------------------------------------------------------
@@ -1398,16 +1408,38 @@ class PDPPage extends BasePage {
       '.item-actions .action.delete'              // custom themes variant
     ).first();
 
+    // Confirmation dialog that HAL UAE shows before deleting
+    const confirmOk = this.page.locator(
+      '.modal-popup button.action-primary, ' +
+      'button:has-text("OK"), ' +
+      '.modal-footer button.action-accept'
+    );
+
     let safety = 20; // prevent infinite loop if DOM behaves unexpectedly
     while (safety-- > 0) {
-      const hasItem = await deleteBtn.isVisible().catch(() => false);
+      // Use count() not isVisible() — Magento CSS-hides delete buttons so
+      // isVisible() returns false even when items exist, breaking the loop early.
+      await this.page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+      const hasItem = (await deleteBtn.count()) > 0;
       if (!hasItem) break; // cart is empty — done
 
       console.log('PDPPage.clearCart — removing one cart item');
-      await deleteBtn.click();
+      // force:true bypasses the CSS visibility check
+      await deleteBtn.click({ force: true });
 
-      // Wait for the cart page to reload after deletion
-      await this.page.waitForLoadState('domcontentloaded');
+      // HAL UAE shows a confirmation modal before deleting. Handle it and
+      // wait for the resulting page navigation with a 30s timeout so Firefox
+      // (which navigates more slowly) doesn't time out.
+      try {
+        await confirmOk.waitFor({ state: 'visible', timeout: 5000 });
+        await Promise.all([
+          this.page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {}),
+          confirmOk.click(),
+        ]);
+      } catch {
+        // No modal — direct POST navigation; wait for it
+        await this.page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+      }
     }
 
     console.log('PDPPage.clearCart — cart is now empty');

@@ -56,7 +56,7 @@ const { PLPPage }        = require('../pages/PLPPage');        // Product Listin
 const { PDPPage }        = require('../pages/PDPPage');        // Product Detail Page
 const { CartPage }       = require('../pages/CartPage');       // Cart + Mini Cart
 const { AuthPage }       = require('../pages/AuthPage');       // Auth0 login flow
-const { MailinatorPage } = require('../pages/MailinatorPage'); // OTP email reader
+const { MailinatorPage } = require('../pages/MailinatorPage'); // Mailinator OTP reader
 
 
 // ============================================================
@@ -69,7 +69,7 @@ const TEST_DATA = {
   // work reliably with Auth0 + Mailinator.
   email: 'kp.abhinand.seller@mailinator.com',
 
-  // Set MOCK_OTP=123456 in PowerShell to skip Mailinator.
+  // Set MOCK_OTP=123456 in PowerShell to skip Gmail.
   mockOtp: process.env.MOCK_OTP || null,
 
   // ── PRODUCTS ───────────────────────────────────────────────
@@ -134,7 +134,15 @@ test.describe('Mini Cart — Full E2E Flyout Validation', () => {
     console.log('MOCK_OTP mode:', TEST_DATA.mockOtp ? 'YES (' + TEST_DATA.mockOtp + ')' : 'NO (Mailinator)');
 
 
-    // ── STEP 2A: Navigate to Auth0 login ────────────────────────
+    // ── STEP 2A: Open Mailinator inbox (snapshot baseline count) ──
+    // Must be done BEFORE triggering Auth0 so waitForOTPEmail() knows
+    // which emails already existed and only waits for the new OTP email.
+    if (!TEST_DATA.mockOtp) {
+      console.log('Setup: opening Mailinator inbox before triggering Auth0 OTP...');
+      await mailinator.openInbox(TEST_DATA.email);
+    }
+
+    // ── STEP 2B: Navigate to Auth0 login ────────────────────────
     await auth.navigateToLogin();
 
     // Entering the email triggers Auth0 to send the OTP email
@@ -149,15 +157,10 @@ test.describe('Mini Cart — Full E2E Flyout Validation', () => {
       console.log('Setup: using MOCK_OTP →', otp);
 
     } else {
-      // Navigate to Mailinator and wait for the OTP email.
-      // If it doesn't arrive within 60s, auto-click Auth0 Resend
-      // and keep waiting. Total budget: 5 minutes.
-      await mailinator.openInbox(TEST_DATA.email);
-
-      const emailArrived = await mailinator.waitForOTPEmail(
-        300000,
-        () => auth.resendOTP()
-      );
+      // Poll Mailinator for the OTP email (no login needed — public inbox).
+      // Mailinator inbox was opened before Auth0 OTP was triggered,
+      // so waitForOTPEmail() knows to look for emails newer than the baseline.
+      const emailArrived = await mailinator.waitForOTPEmail(300000);
 
       if (!emailArrived) {
         throw new Error(

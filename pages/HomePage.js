@@ -59,7 +59,8 @@ class HomePage extends BasePage {
     // --------------------------------------------------------
 
     // The main navigation bar at the top of the page
-    this.navigationBar = page.locator('header');
+    // Use .page-header to avoid matching modal headers (which also use a <header> tag)
+    this.navigationBar = page.locator('header.page-header');
 
     // The HAL logo in the top-left corner of the page
     this.logo = page.locator('header .logo, header img[alt*="HAL"], a.logo, .nav-logo');

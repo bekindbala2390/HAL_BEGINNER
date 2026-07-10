@@ -324,11 +324,19 @@ class SearchPage extends BasePage {
     // Wait for the sort dropdown to be available
     await this.sortBySelect.waitFor({ state: 'visible' });
 
-    // Select the <option> whose value matches sortValue
+    // Change the select value and wait for the URL to update.
+    // On PLP pages Magento does a full GET navigation; on search results pages
+    // it may use AJAX + history.pushState instead. waitForNavigation only catches
+    // full navigations — using waitForURL (which also catches pushState changes)
+    // covers both cases.
+    const urlBefore = this.page.url();
     await this.sortBySelect.selectOption(sortValue);
-
-    // Wait for the product list to reload in the new order
-    await this.waitForPageLoad();
+    await this.page.waitForURL(
+      url => url.toString() !== urlBefore,
+      { timeout: 15000, waitUntil: 'domcontentloaded' }
+    ).catch(() => {
+      // If neither navigation nor pushState fires within 15s, continue anyway
+    });
   }
 
   // ----------------------------------------------------------

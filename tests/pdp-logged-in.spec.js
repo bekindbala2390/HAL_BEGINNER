@@ -6,13 +6,13 @@
 // WHAT IS BEING TESTED:
 //
 //   ─── SETUP (beforeAll) ───────────────────────────────────────
-//   1. Fixed email sprint@mailinator.com is used for login
+//   1. Fixed email kp.abhinand.seller@mailinator.com is used for login
 //   2. The browser navigates to HAL UAE login → redirected to Auth0
-//   3. The mailinator email is entered on Auth0 → OTP email is sent
+//   3. The email is entered on Auth0 → OTP email is sent to Mailinator
 //      The Auth0 OTP challenge URL is saved (contains session state)
-//   4. The SAME browser tab navigates to mailinator.com to read the OTP
+//   4. The SAME browser tab navigates to Mailinator to read the OTP
 //      (Auth0 session cookies survive in the background)
-//   5. The OTP is extracted from the mailinator email
+//   5. The OTP is extracted from the Mailinator email
 //   6. The browser navigates BACK to the saved Auth0 OTP URL
 //   7. OTP is entered → redirected to HAL UAE as a logged-in user
 //   8. A simple product URL is discovered by scanning the PLP
@@ -65,11 +65,16 @@
 // ============================================================
 
 const { test, expect } = require('@playwright/test');
+const fs   = require('fs');
+const path = require('path');
 
-const { PLPPage }        = require('../pages/PLPPage');
-const { PDPPage }        = require('../pages/PDPPage');
-const { AuthPage }       = require('../pages/AuthPage');
+const { PLPPage }   = require('../pages/PLPPage');
+const { PDPPage }   = require('../pages/PDPPage');
+const { AuthPage }  = require('../pages/AuthPage');
 const { MailinatorPage } = require('../pages/MailinatorPage');
+
+const AUTH_STATE_FILE = path.join(__dirname, '..', 'auth-state.json');
+const OTP_URL_FILE    = path.join(__dirname, '..', 'otp-url.txt');
 
 
 test.describe('PDP — Logged-In User: Wishlist & Compare Suite', () => {
@@ -95,17 +100,19 @@ test.describe('PDP — Logged-In User: Wishlist & Compare Suite', () => {
   test.setTimeout(180000);
 
   // ----------------------------------------------------------
-  // Fixed test email — uses a known mailinator.com public inbox.
-  // The inbox "sprint" at mailinator.com receives the Auth0 OTP.
+  // Fixed test email — Gmail inbox that receives the Auth0 OTP.
+  // Requires GMAIL_PASSWORD set in .env to sign in automatically.
   // ----------------------------------------------------------
-  const testEmail = 'haluaeqa@mailinator.com';
+  const testEmail = 'kp.abhinand.seller@mailinator.com';
+  const mockOtp   = process.env.MOCK_OTP || null;
 
   // Shared variables declared at describe scope
-  let page;       // single browser tab shared by ALL steps and tests
-  let plp;        // PLPPage Page Object
-  let pdp;        // PDPPage Page Object
-  let auth;       // AuthPage Page Object
-  let mailinator; // MailinatorPage Page Object
+  let browserContext; // holds saved cookies across runs
+  let page;           // single browser tab shared by ALL steps and tests
+  let plp;            // PLPPage Page Object
+  let pdp;            // PDPPage Page Object
+  let auth;           // AuthPage Page Object
+  let mailinator;     // MailinatorPage Page Object
 
   let simplePDPUrl = null;
 
@@ -116,85 +123,124 @@ test.describe('PDP — Logged-In User: Wishlist & Compare Suite', () => {
   // ----------------------------------------------------------
   // test.beforeAll()
   // -----------------
-  // Runs ONCE before any of the 4 tests.
+  // Runs ONCE before any of the tests.
   //
   // Steps:
-  //   1. Create a single browser page for the whole suite
-  //   2. Navigate to HAL UAE login → Auth0 redirect
-  //   3. Enter the mailinator email → Auth0 sends OTP, saves challenge URL
-  //   4. Navigate the SAME PAGE to mailinator to read the OTP
-  //   5. Navigate back to the saved Auth0 OTP URL
-  //   6. Submit OTP → logged into HAL UAE
-  //   7. Discover simple product URL from the PLP
+  //   1. Create a shared browser context (loads saved cookies if available)
+  //   2. Skip login if saved session is still valid
+  //   3. Otherwise: open Gmail FIRST, then trigger Auth0 OTP,
+  //      navigate back to Gmail to read the code, complete login
+  //   4. Save cookies for next run
+  //   5. Discover simple product URL from the PLP
   // ----------------------------------------------------------
   test.beforeAll(async ({ browser }) => {
 
-    // This timeout applies to the beforeAll hook itself.
-    // 3 minutes covers Auth0 redirect + OTP polling + PLP scan.
-    test.setTimeout(180000);
+    test.setTimeout(480000); // 8 min: covers Gmail login + OTP wait + PLP scan
 
-    // ── STEP 1: Create the single shared browser page ─────────────
-    page     = await browser.newPage();
-    plp       = new PLPPage(page);
-    pdp       = new PDPPage(page);
-    auth      = new AuthPage(page);
-    mailinator = new MailinatorPage(page); // SAME page, not a separate tab
+    // ── STEP 1: Create browser context (load saved cookies if available) ──
+    const stateExists = fs.existsSync(AUTH_STATE_FILE) && !process.env.FORCE_LOGIN;
+    const contextOpts = stateExists ? { storageState: AUTH_STATE_FILE } : {};
+    browserContext = await browser.newContext(contextOpts);
+    page  = await browserContext.newPage();
+    plp   = new PLPPage(page);
+    pdp   = new PDPPage(page);
+    auth  = new AuthPage(page);
+    mailinator = new MailinatorPage(page);
 
-    console.log(`\nbeforeAll: test run email → ${testEmail}`);
+    console.log(`\nbeforeAll: test email       → ${testEmail}`);
+    console.log(`beforeAll: saved auth state → ${stateExists ? AUTH_STATE_FILE : 'none'}`);
+    console.log(`beforeAll: MOCK_OTP         → ${mockOtp || 'NO (Mailinator flow)'}`);
 
-    // ── STEP 2: Start the Auth0 login flow ────────────────────────
-    // Visits /customer/account/login/ → Magento redirects to Auth0
-    await auth.navigateToLogin();
+    // ── STEP 2: Check if the saved session is still valid ─────────────
+    let loggedIn = false;
 
-    // ── STEP 3: Submit the email → Auth0 sends OTP ────────────────
-    // After this call:
-    //   • Auth0 has sent the OTP to testEmail
-    //   • The browser is on the Auth0 OTP challenge page
-    //   • auth.otpPageUrl holds the URL (we navigate back to it later)
-    await auth.enterEmailAndSubmit(testEmail);
-
-    // ── STEP 4: Navigate the SAME PAGE to mailinator to read OTP ────
-    // openInbox() navigates the browser tab to mailinator.com.
-    // Auth0's session cookies (scoped to auth0.com) survive this
-    // because cookies are domain-scoped and not lost by navigation.
-    await mailinator.openInbox(testEmail);
-
-    // Poll mailinator by reloading until the OTP email arrives.
-    const emailArrived = await mailinator.waitForOTPEmail(90000);
-    if (!emailArrived) {
-      throw new Error(
-        `beforeAll: OTP email did not arrive at ${testEmail} within 90s. ` +
-        `Check that Auth0 is delivering to mailinator.com (screenshot in test-results/).`
-      );
+    if (stateExists) {
+      await page.goto('https://mcstaging2.hal-uae.com/customer/account/login/');
+      await page.waitForLoadState('domcontentloaded').catch(() => {});
+      const landedUrl = page.url();
+      if (!landedUrl.includes('/login') && landedUrl.includes('mcstaging2.hal-uae.com')) {
+        loggedIn = true;
+        console.log('beforeAll: saved session valid — redirected to:', landedUrl);
+      } else {
+        loggedIn = await auth.isLoggedIn();
+        console.log('beforeAll: saved session valid =', loggedIn);
+      }
     }
 
-    // ── STEP 5: Read the OTP from the email ───────────────────────
-    const otp = await mailinator.getOTPFromLatestEmail();
-    if (!otp) {
-      throw new Error(
-        `beforeAll: OTP email arrived but no 6-digit code found in body. ` +
-        `Check MailinatorPage.getOTPFromLatestEmail() regex against the email content.`
-      );
-    }
-    console.log(`beforeAll: OTP extracted → ${otp}`);
-
-    // ── STEP 6: Navigate back to Auth0 OTP page and submit ────────
-    // auth.otpPageUrl was saved by enterEmailAndSubmit().
-    // Returning to it restores the Auth0 session (cookies intact).
-    await auth.navigateBackToOTPPage();
-    await auth.enterOTPAndSubmit(otp);
-
-    // Confirm login
-    const loggedIn = await auth.isLoggedIn();
-    console.log(`beforeAll: logged in → ${loggedIn}`);
     if (!loggedIn) {
-      throw new Error(
-        `beforeAll: Login failed — not showing logged-in state on HAL UAE. ` +
-        `Current URL: ${page.url()}`
-      );
+      // ── STEP 3A: Check for saved OTP URL (MOCK_OTP re-run path) ──────
+      const hasSavedUrl = fs.existsSync(OTP_URL_FILE);
+      const urlAge      = hasSavedUrl
+        ? Date.now() - fs.statSync(OTP_URL_FILE).mtimeMs
+        : Infinity;
+      const reuseUrl    = mockOtp && hasSavedUrl && urlAge < 8 * 60 * 1000;
+
+      if (reuseUrl) {
+        // Use saved challenge URL — no new OTP email sent
+        auth.otpPageUrl = fs.readFileSync(OTP_URL_FILE, 'utf8').trim();
+        fs.unlinkSync(OTP_URL_FILE);
+        console.log('beforeAll: reusing saved OTP challenge URL (age', Math.round(urlAge / 1000), 's)');
+
+      } else {
+        if (!mockOtp) {
+          // Open Mailinator inbox BEFORE triggering Auth0 so openInbox()
+          // snapshots the current email count as a baseline.
+          console.log('beforeAll: opening Mailinator inbox before triggering Auth0 OTP...');
+          await mailinator.openInbox(testEmail);
+        }
+
+        // Trigger Auth0 OTP (sends email to Mailinator inbox)
+        await auth.navigateToLogin();
+        await auth.enterEmailAndSubmit(testEmail);
+
+        if (mockOtp) {
+          // Save URL so the NEXT run can use MOCK_OTP correctly
+          fs.writeFileSync(OTP_URL_FILE, auth.otpPageUrl, 'utf8');
+          console.log('beforeAll: OTP URL saved — check Mailinator for the NEW code, then re-run with MOCK_OTP.');
+        }
+      }
+
+      // ── STEP 3B: Get the OTP ──────────────────────────────────────────
+      let otp;
+
+      if (mockOtp) {
+        otp = mockOtp;
+        console.log('beforeAll: using MOCK_OTP →', otp);
+      } else {
+        // Poll Mailinator for the OTP email (no login needed — public inbox).
+        const emailArrived = await mailinator.waitForOTPEmail(300000);
+
+        if (!emailArrived) {
+          throw new Error(
+            `beforeAll: OTP email did not arrive at ${testEmail} within 5 min.\n` +
+            `TIP: $env:MOCK_OTP = "123456"  then re-run.`
+          );
+        }
+
+        otp = await mailinator.getOTPFromLatestEmail();
+        if (!otp) throw new Error('beforeAll: email arrived but OTP not found in body.');
+        console.log(`beforeAll: OTP extracted → ${otp}`);
+      }
+
+      // ── STEP 3C: Complete Auth0 login ─────────────────────────────────
+      await auth.navigateBackToOTPPage();
+      await auth.enterOTPAndSubmit(otp);
+
+      loggedIn = await auth.isLoggedIn();
+      console.log(`beforeAll: logged in → ${loggedIn}`);
+      if (!loggedIn) {
+        throw new Error(
+          `beforeAll: Login failed — not showing logged-in state on HAL UAE.\n` +
+          `Current URL: ${page.url()}`
+        );
+      }
+
+      // ── STEP 3D: Save cookies for future runs ─────────────────────────
+      await browserContext.storageState({ path: AUTH_STATE_FILE });
+      console.log('beforeAll: auth state saved →', AUTH_STATE_FILE);
     }
 
-    // ── STEP 7: Discover simple product URL ───────────────────────
+    // ── STEP 4: Discover simple product URL ───────────────────────
     await plp.goto();
 
     const allLinks = await page

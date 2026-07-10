@@ -198,8 +198,10 @@ class AuthPage extends BasePage {
     await this.otpInput.fill(otp);
     await this.otpSubmitButton.click();
 
-    // Wait for Auth0 to validate and redirect back to HAL UAE
-    await this.page.waitForURL('**/mcstaging2.hal-uae.com/**', { timeout: 60000 });
+    // Wait for Auth0 to validate and redirect back to HAL UAE.
+    // Use domcontentloaded (not the default 'load') — HAL UAE's heavy page
+    // takes too long to fire the load event and the 60s timeout expires.
+    await this.page.waitForURL('**/mcstaging2.hal-uae.com/**', { timeout: 60000, waitUntil: 'domcontentloaded' });
     console.log('AuthPage.enterOTPAndSubmit — redirected to:', this.page.url());
   }
 

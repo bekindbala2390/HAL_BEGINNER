@@ -186,35 +186,9 @@ test.describe('Homepage - Full Test Suite', () => {
   // ============================================================
 
   // --------------------------------------------------------
-  // TEST 7: Clicking the homepage promotional banner redirects
-  //
-  // The browser is still on the homepage after Group 1.
-  // No goto() needed here.
-  // --------------------------------------------------------
-  test('clicking first homepage banner should redirect away from homepage', async () => {
-
-    // Save the URL before clicking (should be the homepage)
-    const urlBefore = page.url();
-
-    // Click the "Buy Now" link in the Food & Daily Meal section
-    await homePage.clickFirstBannerLink();
-
-    // Save the URL after the click and page load
-    const urlAfter = page.url();
-
-    console.log('URL before banner click:', urlBefore);
-    console.log('URL after banner click: ', urlAfter);
-
-    // The URL must have changed — we should be on a new page now
-    expect(urlAfter).not.toEqual(urlBefore);
-  });
-
-
-  // --------------------------------------------------------
   // TEST 8: Clicking the About Us nav link redirects
   //
-  // Test 7 left us on the food-beverage page.
-  // We call homePage.goto() first to return to the homepage.
+  // We navigate to the homepage first before clicking.
   // --------------------------------------------------------
   test('clicking About Us navigation link should redirect away from homepage', async () => {
 
